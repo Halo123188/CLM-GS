@@ -14,6 +14,7 @@ import math
 from diff_gaussian_rasterization import (
     GaussianRasterizationSettings,
     GaussianRasterizer,
+    get_send2gpu
 )
 from gsplat import (
     rasterization,
@@ -1079,7 +1080,11 @@ def gsplat_distributed_preprocess3dgs_and_all2all_final(
         param_handles.append(means3D_all)
             
         # TODO: Imple the send2gpu() func to compute the filter
-        send2gpu_filter = torch.ones(means3D_all.shape[0], dtype=torch.bool, device="cuda")
+        # send2gpu_filter = torch.ones(means3D_all.shape[0], dtype=torch.bool, device="cuda")
+        # TODO: Currently only works with bsz=1.
+        viewmatrix = batched_viewpoint_cameras[0].world_view_transform
+        projmatrix = batched_viewpoint_cameras[0].full_proj_transform
+        send2gpu_filter = get_send2gpu(means3D_all, viewmatrix, projmatrix)
         
         # Prepare gaussians on GPU. NOTE: Make sure that all tensors on gpu is differentiable.
         means3D = means3D_all[send2gpu_filter].detach().requires_grad_(True) # on gpu
