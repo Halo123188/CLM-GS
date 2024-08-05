@@ -192,6 +192,7 @@ class BenchmarkParams(ParamGroup):
 class DebugParams(ParamGroup):
     def __init__(self, parser):
         self.zhx_debug = False  # log debug information that zhx needs.
+        self.mxw_debug = ""
         self.stop_update_param = (
             False  # stop updating parameters. No optimizer.step() will be called.
         )

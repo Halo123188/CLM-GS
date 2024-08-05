@@ -1071,6 +1071,8 @@ def gsplat_distributed_preprocess3dgs_and_all2all_final(
     send2gpu_filter = None  
     send2gpu_filter_cpu = None  
     if offload:
+        if timers is not None:
+            timers.start("Update means3D_all")
         # TODO: Optimizate this: use send2gpu_filter from prev iter to load only updated means3D
         # NOTE: After densification, (means3D_all, prev_filter, prev_filter_cpu) are reset to None.
         if prev_filter is not None and prev_filter_cpu is not None and means3D_all is not None:
@@ -1078,39 +1080,183 @@ def gsplat_distributed_preprocess3dgs_and_all2all_final(
         else:
             means3D_all = pc._xyz.detach().cuda()
         param_handles.append(means3D_all)
-            
+        if timers is not None:
+            timers.stop("Update means3D_all")
+        
+        if timers is not None:
+            timers.start("Compute send2gpu_filter")    
         # TODO: Imple the send2gpu() func to compute the filter
         # send2gpu_filter = torch.ones(means3D_all.shape[0], dtype=torch.bool, device="cuda")
         # TODO: Currently only works with bsz=1.
         viewmatrix = batched_viewpoint_cameras[0].world_view_transform
         projmatrix = batched_viewpoint_cameras[0].full_proj_transform
         send2gpu_filter = get_send2gpu(means3D_all, viewmatrix, projmatrix)
+        if timers is not None:
+            timers.stop("Compute send2gpu_filter")
         
+        if timers is not None:
+            timers.start("Index and detach means3D_all")  
         # Prepare gaussians on GPU. NOTE: Make sure that all tensors on gpu is differentiable.
         means3D = means3D_all[send2gpu_filter].detach().requires_grad_(True) # on gpu
         param_handles.append(means3D)
+        if timers is not None:
+            timers.stop("Index and detach means3D_all") 
         
+        if timers is not None:
+            timers.start("Move filter")     
         send2gpu_filter_cpu = send2gpu_filter.cpu()
+        if timers is not None:
+            timers.stop("Move filter")
+            
+        N = means3D.shape[0]
+        args = utils.get_args()
+        iteration = utils.get_cur_iter()
+        log_file = utils.get_log_file()
+        if (iteration % args.log_interval) == 1:
+            log_file.write(
+                "<<< # filtered gaussians this iter = {} >>>\n".format(N)
+            )
+            
+        if args.mxw_debug == 'seperate':
+            if timers is not None:
+                timers.start("Index parameters")
+            _opacities = pc._opacity[send2gpu_filter_cpu]
+            _scales = pc._scaling[send2gpu_filter_cpu]
+            _rotations = pc._rotation[send2gpu_filter_cpu]
+            _features_dc = pc._features_dc[send2gpu_filter_cpu]
+            _features_rest = pc._features_rest[send2gpu_filter_cpu]
+            if timers is not None:
+                timers.stop("Index parameters")
+            
+            if timers is not None:
+                timers.start("Detach parameters")
+            _opacities = _opacities.detach()
+            _scales = _scales.detach()
+            _rotations = _rotations.detach()
+            _features_dc = _features_dc.detach()
+            _features_rest = _features_rest.detach()
+            if timers is not None:
+                timers.stop("Detach parameters")
+            
+            if timers is not None:
+                timers.start("Cat parameters")
+            _opacities_dim1 = _opacities.shape[1] # (N, 1)
+            _scales_dim1 = _scales.shape[1] # (N, 3)
+            _rotations_dim1 = _rotations.shape[1] # (N, 4)
+            
+            _features_dc_dims = _features_dc.shape # (N, 1, 3)
+            _features_dc = _features_dc.view(_features_dc_dims[0], _features_dc_dims[1] * _features_dc_dims[2]) # (N, 3)
+            _features_rest_dims = _features_rest.shape # (N, 15, 3)
+            _features_rest = _features_rest.view(_features_rest_dims[0], _features_rest_dims[1] * _features_rest_dims[2]) # (N, 45)
+            
+            _params_pkg = torch.cat((_opacities, _scales, _rotations, _features_dc, _features_rest), dim=1)
+            if timers is not None:
+                timers.stop("Cat parameters")
+            
+            if timers is not None:
+                timers.start("Move parameters")
+            _params_pkg = _params_pkg.cuda()
+            if timers is not None:
+                timers.stop("Move parameters")
+            
+            if timers is not None:
+                timers.start("Unpack parameters")
+            _opacities, _scales, _rotations, _features_dc, _features_rest = torch.split(
+                _params_pkg,
+                [_opacities_dim1, _scales_dim1, _rotations_dim1, _features_dc_dims[1] * _features_dc_dims[2], _features_rest_dims[1] * _features_rest_dims[2]],
+                dim=1
+            )
+            _features_dc = _features_dc.view(-1, _features_dc_dims[1], _features_dc_dims[2])
+            _features_rest = _features_rest.view(-1, _features_rest_dims[1], _features_rest_dims[2])
+            if timers is not None:
+                timers.stop("Unpack parameters")   
+        elif args.mxw_debug == 'new':
+            _opacities_dim1 = pc._opacity.shape[1]
+            _scales_dim1 = pc._scaling.shape[1]
+            _rotations_dim1 = pc._rotation.shape[1]
+            _features_dc_dim1 = pc._features_dc.shape[1]
+            _features_dc_dim2 = pc._features_dc.shape[2]
+            _features_rest_dim1 = pc._features_rest.shape[1]
+            _features_rest_dim2 = pc._features_rest.shape[2]
+            D = _opacities_dim1 + _scales_dim1 + _rotations_dim1 + _features_dc_dim1 * _features_dc_dim2 + _features_rest_dim1 * _features_rest_dim2
+
+            if timers is not None:
+                timers.start("Allocate pinned mem and cat params") 
+            # Reserve pinned memory for parameter transmision.
+            params_pin = torch.empty((N, D), dtype=torch.float32, pin_memory=True)
+            
+            torch.cat(
+                (
+                    pc._opacity[send2gpu_filter_cpu].detach(),
+                    pc._scaling[send2gpu_filter_cpu].detach(),
+                    pc._rotation[send2gpu_filter_cpu].detach(),
+                    pc._features_dc[send2gpu_filter_cpu].detach().view(-1, _features_dc_dim1 * _features_dc_dim2),
+                    pc._features_rest[send2gpu_filter_cpu].detach().view(-1, _features_rest_dim1 * _features_rest_dim2)
+                ), 
+                dim=1,
+                out=params_pin
+            )
+            if timers is not None:
+                timers.stop("Allocate pinned mem and cat params") 
+            
+            if timers is not None:
+                timers.start("Move parameters")
+            params_pin_gpu = params_pin.cuda()
+            if timers is not None:
+                timers.stop("Move parameters")
+            
+            if timers is not None:
+                timers.start("Unpack parameters")
+            _opacities, _scales, _rotations, _features_dc, _features_rest = torch.split(
+                params_pin_gpu,
+                [_opacities_dim1, _scales_dim1, _rotations_dim1, _features_dc_dim1 * _features_dc_dim2, _features_rest_dim1 * _features_rest_dim2],
+                dim=1
+            )
+            _features_dc = _features_dc.view(-1, _features_dc_dim1, _features_dc_dim2)
+            _features_rest = _features_rest.view(-1, _features_rest_dim1, _features_rest_dim2)
+            if timers is not None:
+                timers.stop("Unpack parameters")
+            
+        if timers is not None:
+            timers.start("Requires_grad params")
+        _opacities = _opacities.requires_grad_(True)
+        _scales = _scales.requires_grad_(True)
+        _rotations = _rotations.requires_grad_(True)
+        _features_dc = _features_dc.requires_grad_(True)
+        _features_rest = _features_rest.requires_grad_(True)
+        if timers is not None:
+            timers.stop("Requires_grad params")
         
-        _opacities = pc._opacity[send2gpu_filter_cpu].detach().cuda().requires_grad_(True)
+        if timers is not None:
+            timers.start("Activate params")
         opacities = pc.opacity_activation(_opacities)
-        param_handles.append(_opacities)
-        
-        _scales = pc._scaling[send2gpu_filter_cpu].detach().cuda().requires_grad_(True)
         scales = pc.scaling_activation(_scales)
-        param_handles.append(_scales)
-        
-        _rotations = pc._rotation[send2gpu_filter_cpu].detach().cuda().requires_grad_(True)
         rotations = pc.rotation_activation(_rotations)
-        param_handles.append(_rotations)
+        if timers is not None:
+            timers.stop("Activate params")
         
-        _features_dc = pc._features_dc[send2gpu_filter_cpu].detach().cuda().requires_grad_(True)
-        _features_rest = pc._features_rest[send2gpu_filter_cpu].detach().cuda().requires_grad_(True)
+        if timers is not None:
+            timers.start("Cat shs")    
         shs = torch.cat([_features_dc, _features_rest], dim=1)
+        if timers is not None:
+            timers.stop("Cat shs")        
+        
+        if timers is not None:
+            timers.start("Append handles") 
+        param_handles.append(_opacities)
+        param_handles.append(_scales)
+        param_handles.append(_rotations)
         param_handles.append(_features_dc)
         param_handles.append(_features_rest)
+        if timers is not None:
+            timers.stop("Append handles") 
         
+        if timers is not None:
+            timers.start("Activate sh degree") 
         sh_degree = pc.active_sh_degree
+        if timers is not None:
+            timers.stop("Activate sh degree")
+            
     else:
         means3D = pc.get_xyz
         opacities = pc.get_opacity

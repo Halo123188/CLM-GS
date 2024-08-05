@@ -300,6 +300,41 @@ def check_initial_gpu_memory_usage(prefix):
         )
 
 
+def gaussian_report(gaussians):
+    iteration = get_cur_iter()
+    args = get_args()
+    log_file = get_log_file()
+    
+    if (iteration % args.log_interval) == 1:
+        log_file.write(
+            "### Iteration {}, num of gaussians = {} ###\n".format(
+                iteration,
+                gaussians.get_xyz.shape[0]
+            )
+        )
+    
+
+
+def memory_report(prefix):
+    iteration = get_cur_iter()
+    args = get_args()
+    log_file = get_log_file()
+    
+    if (iteration % args.log_interval) == 1:
+        log_file.write(
+            "[Memory Report] {}\n".format(prefix)
+            + " -> [CPU] Memory Usage: {} GB. Available Memory: {} GB. Total memory: {} GB.\n".format(
+                psutil.virtual_memory().used / 1024 / 1024 / 1024,
+                psutil.virtual_memory().available / 1024 / 1024 / 1024,
+                psutil.virtual_memory().total / 1024 / 1024 / 1024,
+            )
+            + " -> [GPU] Memory usage: {} GB. Max Memory usage: {} GB.\n".format(
+                torch.cuda.memory_allocated() / 1024 / 1024 / 1024,
+                torch.cuda.max_memory_allocated() / 1024 / 1024 / 1024,
+            )
+        )  
+        
+
 def check_memory_usage(log_file, args, iteration, gaussians, before_densification_stop):
     global DEFAULT_GROUP
 
