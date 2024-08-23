@@ -27,7 +27,7 @@ from tqdm import tqdm
 from utils.image_utils import psnr
 import torch.distributed as dist
 from densification import densification, gsplat_densification
-
+from diff_gaussian_rasterization import send2cpu
 
 def training(dataset_args, opt_args, pipe_args, args, log_file):
 
@@ -40,7 +40,7 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
     start_from_this_iteration = 1
 
     # Init parameterized scene
-    gaussians = GaussianModel(sh_degree=dataset_args.sh_degree, offload=args.offload)
+    gaussians = GaussianModel(sh_degree=dataset_args.sh_degree, offload=args.offload, mxw_debug=args.mxw_debug)
 
     with torch.no_grad():
         scene = Scene(args, gaussians)
@@ -79,6 +79,15 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
 
     if bg_color is not None:
         background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
+        
+    # Preallocate memory for grad
+    if args.offload and args.mxw_debug == 'fused':
+        means3D_grad_buffer = torch.empty((args.prealloc_capacity, 3), dtype=torch.float32, pin_memory=True)
+        opacities_grad_buffer = torch.empty((args.prealloc_capacity, 1), dtype=torch.float32, pin_memory=True)
+        scales_grad_buffer = torch.empty((args.prealloc_capacity, 3), dtype=torch.float32, pin_memory=True)
+        rotations_grad_buffer = torch.empty((args.prealloc_capacity, 4), dtype=torch.float32, pin_memory=True)
+        features_dc_grad_buffer = torch.empty((args.prealloc_capacity, 1, 3), dtype=torch.float32, pin_memory=True)
+        features_rest_grad_buffer = torch.empty((args.prealloc_capacity, 15, 3), dtype=torch.float32, pin_memory=True)
 
     # Training Loop
     end2end_timers = End2endTimer(args)
@@ -98,6 +107,14 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
     for iteration in range(
         start_from_this_iteration, opt_args.iterations + 1, args.bsz
     ):
+        if args.offload and args.mxw_debug == 'fused':
+            assert gaussians._xyz.is_pinned(), "[at the start of an iteration] `self._xyz` is not in pinned memory"
+            assert gaussians._scaling.is_pinned(), "[at the start of an iteration] `self._scaling` is not in pinned memory"
+            assert gaussians._rotation.is_pinned(), "[at the start of an iteration] `self._rotation` is not in pinned memory"
+            assert gaussians._opacity.is_pinned(), "[at the start of an iteration] `self._opacity` is not in pinned memory"
+            assert gaussians._features_dc.is_pinned(), "[at the start of an iteration] `self._features_dc` is not in pinned memory"
+            assert gaussians._features_rest.is_pinned(), "[at the start of an iteration] `self._features_rest` is not in pinned memory"
+        
         # Step Initialization
         if iteration // args.bsz % 30 == 0:
             progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}"})
@@ -105,6 +122,8 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
         utils.set_cur_iter(iteration)
         gaussians.update_learning_rate(iteration)
         num_trained_batches += 1
+        # utils.gaussian_report(gaussians)
+        # utils.memory_report("at the beginning of an iteration")
         timers.clear()
         if args.nsys_profile:
             nvtx.range_push(f"iteration[{iteration},{iteration+args.bsz})")
@@ -152,6 +171,7 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
             timers.stop("load_cameras")
 
         if args.backend == "gsplat":
+            # utils.memory_report("before preprocessing")
             batched_screenspace_pkg = (
                 gsplat_distributed_preprocess3dgs_and_all2all_final(
                     batched_cameras,
@@ -166,6 +186,7 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
                     prev_filter_cpu=send2gpu_filter_cpu,
                 )
             )
+            # utils.memory_report("after preprocessing")
             batched_image, batched_compute_locally = gsplat_render_final(
                 batched_screenspace_pkg, batched_strategies
             )
@@ -173,6 +194,7 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
                 cuda_args["stats_collector"]
                 for cuda_args in batched_screenspace_pkg["batched_cuda_args"]
             ]
+            # utils.memory_report("after rendering")
         else:
             batched_screenspace_pkg = distributed_preprocess3dgs_and_all2all_final(
                 batched_cameras,
@@ -202,30 +224,88 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
         loss_sum.backward()
         timers.stop("backward")
         utils.check_initial_gpu_memory_usage("after backward")
+        # utils.memory_report("after backward")
         
         # Sync grad with cpu.
         if args.offload:
-            means3D_all, means3D, opacities, scales, rotations, features_dc, features_rest = batched_screenspace_pkg["param_handles"]
-            send2gpu_filter = batched_screenspace_pkg["send2gpu_filter"]
-            send2gpu_filter_cpu = batched_screenspace_pkg["send2gpu_filter_cpu"]
+            timers.start("sync_grad_to_cpu")
+            if args.mxw_debug == 'fused':                    
+                timers.start("get all handles")
+                means3D_all, means3D, opacities, scales, rotations, features_dc, features_rest = batched_screenspace_pkg["param_handles"]
+                send2gpu_filter = batched_screenspace_pkg["send2gpu_filter"]
+                timers.stop("get all handles")
+                
+                timers.start("zero out grads")
+                N = gaussians._xyz.shape[0]
+                means3D_grad_buffer[:N, :].zero_()
+                opacities_grad_buffer[:N, :].zero_()
+                scales_grad_buffer[:N, :].zero_()
+                rotations_grad_buffer[:N, :].zero_()
+                features_dc_grad_buffer[:N, :, :].zero_()
+                features_rest_grad_buffer[:N, :, :].zero_()
+                timers.stop("zero out grads")
+                
+                timers.start("fused grad transfer")
+                send2cpu(
+                    means3D.grad,
+                    opacities.grad,
+                    scales.grad,
+                    rotations.grad,
+                    features_dc.grad,
+                    features_rest.grad,
+                    send2gpu_filter,
+                    means3D_grad_buffer[:N, :],
+                    opacities_grad_buffer[:N, :],
+                    scales_grad_buffer[:N, :],
+                    rotations_grad_buffer[:N, :],
+                    features_dc_grad_buffer[:N, :, :],
+                    features_rest_grad_buffer[:N, :, :]
+                ) # This kernel blocks the cpu.
+                timers.stop("fused grad transfer")
+                
+                # Free grads on gpu
+                means3D.grad = None
+                opacities.grad = None
+                scales.grad = None
+                rotations.grad = None
+                features_dc.grad = None
+                features_rest.grad = None
+                
+                timers.start("load from buffer")
+                gaussians._xyz.grad = means3D_grad_buffer[:N, :]
+                gaussians._opacity.grad = opacities_grad_buffer[:N, :]
+                gaussians._scaling.grad = scales_grad_buffer[:N, :]
+                gaussians._rotation.grad = rotations_grad_buffer[:N, :]
+                gaussians._features_dc.grad = features_dc_grad_buffer[:N, :, :]
+                gaussians._features_rest.grad = features_rest_grad_buffer[:N, :, :]
+                timers.stop("load from buffer") 
+            else:
+                timers.start("get all handles")
+                means3D_all, means3D, opacities, scales, rotations, features_dc, features_rest = batched_screenspace_pkg["param_handles"]
+                send2gpu_filter = batched_screenspace_pkg["send2gpu_filter"]
+                send2gpu_filter_cpu = batched_screenspace_pkg["send2gpu_filter_cpu"]
+                timers.stop("get all handles")
 
-            gaussians._xyz.grad = torch.zeros_like(gaussians._xyz)
-            gaussians._xyz.grad[send2gpu_filter_cpu] = means3D.grad.cpu()
+                timers.start("zero init grads")
+                gaussians._xyz.grad = torch.zeros_like(gaussians._xyz)
+                gaussians._opacity.grad = torch.zeros_like(gaussians._opacity)
+                gaussians._scaling.grad = torch.zeros_like(gaussians._scaling)
+                gaussians._rotation.grad = torch.zeros_like(gaussians._rotation)
+                gaussians._features_dc.grad = torch.zeros_like(gaussians._features_dc)
+                gaussians._features_rest.grad = torch.zeros_like(gaussians._features_rest)
+                timers.stop("zero init grads")
+                
+                timers.start("transfer grads to cpu")
+                gaussians._xyz.grad[send2gpu_filter_cpu] = means3D.grad.cpu()
+                gaussians._opacity.grad[send2gpu_filter_cpu] = opacities.grad.cpu()
+                gaussians._scaling.grad[send2gpu_filter_cpu] = scales.grad.cpu()
+                gaussians._rotation.grad[send2gpu_filter_cpu] = rotations.grad.cpu()
+                gaussians._features_dc.grad[send2gpu_filter_cpu] = features_dc.grad.cpu()
+                gaussians._features_rest.grad[send2gpu_filter_cpu] = features_rest.grad.cpu()
+                timers.stop("transfer grads to cpu")
 
-            gaussians._opacity.grad = torch.zeros_like(gaussians._opacity)
-            gaussians._opacity.grad[send2gpu_filter_cpu] = opacities.grad.cpu()
-
-            gaussians._scaling.grad = torch.zeros_like(gaussians._scaling)
-            gaussians._scaling.grad[send2gpu_filter_cpu] = scales.grad.cpu()
-
-            gaussians._rotation.grad = torch.zeros_like(gaussians._rotation)
-            gaussians._rotation.grad[send2gpu_filter_cpu] = rotations.grad.cpu()
-            
-            gaussians._features_dc.grad = torch.zeros_like(gaussians._features_dc)
-            gaussians._features_dc.grad[send2gpu_filter_cpu] = features_dc.grad.cpu()
-
-            gaussians._features_rest.grad = torch.zeros_like(gaussians._features_rest)
-            gaussians._features_rest.grad[send2gpu_filter_cpu] = features_rest.grad.cpu()
+            timers.stop("sync_grad_to_cpu")
+            # utils.memory_report("after syncing grad to cpu")
 
         with torch.no_grad():
             # Adjust workload division strategy.
@@ -283,6 +363,7 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
             end2end_timers.start()
 
             # Densification
+            # utils.memory_report("before densification")
             if args.backend == "gsplat":
                 gsplat_densification(
                     iteration, scene, gaussians, batched_screenspace_pkg, offload=args.offload
@@ -296,6 +377,13 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
                     
             else:
                 densification(iteration, scene, gaussians, batched_screenspace_pkg)
+            # utils.memory_report("after densification and before freeing activation states")
+            
+            # Free activation states
+            batched_screenspace_pkg = None
+            batched_image = None
+            batched_compute_locally = None
+            # utils.memory_report("after freeing activation states and before saving gaussians")
 
             # Save Gaussians
             if any(
@@ -322,6 +410,7 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
                     ) as f:
                         json.dump(strategy_history.to_json(), f)
                 end2end_timers.start()
+                # utils.memory_report("after densification")
 
             # Save Checkpoints
             if any(
@@ -353,6 +442,7 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
 
             # Optimizer step
             if iteration < opt_args.iterations:
+                # utils.memory_report("before optimizer step")
                 timers.start("optimizer_step")
 
                 if (
@@ -367,6 +457,7 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
                 gaussians.optimizer.zero_grad(set_to_none=True)
                 timers.stop("optimizer_step")
                 utils.check_initial_gpu_memory_usage("after optimizer step")
+                # utils.memory_report("after optimizer step")
 
         # Finish a iteration and clean up
         torch.cuda.synchronize()
@@ -378,6 +469,7 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
             nvtx.range_pop()
         if utils.check_enable_python_timer():
             timers.printTimers(iteration, mode="sum")
+        utils.memory_report("at the end of the iteration")
         log_file.flush()
 
     # Finish training

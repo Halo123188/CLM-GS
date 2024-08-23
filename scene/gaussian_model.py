@@ -49,7 +49,7 @@ class GaussianModel:
 
         self.rotation_activation = torch.nn.functional.normalize
 
-    def __init__(self, sh_degree: int, offload: bool):
+    def __init__(self, sh_degree: int, offload: bool, mxw_debug):
         self.active_sh_degree = 0
         self.max_sh_degree = sh_degree
         self._xyz = torch.empty(0)
@@ -68,6 +68,7 @@ class GaussianModel:
         self.spatial_lr_scale = 0
         self.setup_functions()
         self.device = "cpu" if offload else "cuda"
+        self.mxw_debug = mxw_debug
 
     def capture(self):
         return (
@@ -219,20 +220,37 @@ class GaussianModel:
             )
             # print("rank", utils.GLOBAL_RANK, "Number of initialized points after random drop : ", fused_point_cloud.shape[0])
 
-        self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
-        self._features_dc = nn.Parameter(
-            features[:, :, 0:1].transpose(1, 2).contiguous().requires_grad_(True)
-        )
-        self._features_rest = nn.Parameter(
-            features[:, :, 1:].transpose(1, 2).contiguous().requires_grad_(True)
-        )
-        self._scaling = nn.Parameter(scales.requires_grad_(True))
-        self._rotation = nn.Parameter(rots.requires_grad_(True))
-        self._opacity = nn.Parameter(opacities.requires_grad_(True))
-        self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device=self.device)
-        self.sum_visible_count_in_one_batch = torch.zeros(
-            (self.get_xyz.shape[0]), device=self.device
-        ) # TODO: Check where this param is used. If it's used for gpu, should stil init it there.
+        if self.device == 'cpu' and self.mxw_debug == 'fused':
+            # init parameters in pinned memory
+            self._xyz = nn.Parameter(fused_point_cloud.pin_memory().requires_grad_(True))
+            self._features_dc = nn.Parameter(
+                features[:, :, 0:1].transpose(1, 2).contiguous().pin_memory().requires_grad_(True)
+            )
+            self._features_rest = nn.Parameter(
+                features[:, :, 1:].transpose(1, 2).contiguous().pin_memory().requires_grad_(True)
+            )
+            self._scaling = nn.Parameter(scales.pin_memory().requires_grad_(True))
+            self._rotation = nn.Parameter(rots.pin_memory().requires_grad_(True))
+            self._opacity = nn.Parameter(opacities.pin_memory().requires_grad_(True))
+            self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device=self.device)
+            self.sum_visible_count_in_one_batch = torch.zeros(
+                (self.get_xyz.shape[0]), device=self.device
+            ) # TODO: Check where this param is used. If it's used for gpu, should stil init it there.
+        else:
+            self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
+            self._features_dc = nn.Parameter(
+                features[:, :, 0:1].transpose(1, 2).contiguous().requires_grad_(True)
+            )
+            self._features_rest = nn.Parameter(
+                features[:, :, 1:].transpose(1, 2).contiguous().requires_grad_(True)
+            )
+            self._scaling = nn.Parameter(scales.requires_grad_(True))
+            self._rotation = nn.Parameter(rots.requires_grad_(True))
+            self._opacity = nn.Parameter(opacities.requires_grad_(True))
+            self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device=self.device)
+            self.sum_visible_count_in_one_batch = torch.zeros(
+                (self.get_xyz.shape[0]), device=self.device
+            ) # TODO: Check where this param is used. If it's used for gpu, should stil init it there.
 
     def all_parameters(self):
         return [
@@ -799,7 +817,10 @@ class GaussianModel:
                     stored_state["exp_avg_sq"] = torch.zeros_like(tensor)
 
                 del self.optimizer.state[group["params"][0]]
-                group["params"][0] = nn.Parameter(tensor.requires_grad_(True))
+                if self.device == 'cpu' and self.mxw_debug == 'fused':
+                    group["params"][0] = nn.Parameter(tensor.pin_memory().requires_grad_(True))
+                else:
+                    group["params"][0] = nn.Parameter(tensor.requires_grad_(True))
                 self.optimizer.state[group["params"][0]] = stored_state
 
                 optimizable_tensors[group["name"]] = group["params"][0]
@@ -819,16 +840,34 @@ class GaussianModel:
                     stored_state["exp_avg_sq"] = stored_state["exp_avg_sq"][mask]
 
                 del self.optimizer.state[group["params"][0]]
-                group["params"][0] = nn.Parameter(
-                    (group["params"][0][mask].requires_grad_(True))
-                )
-                self.optimizer.state[group["params"][0]] = stored_state
+                if self.device == 'cpu' and self.mxw_debug == 'fused':
+                    group["params"][0] = nn.Parameter(
+                        (group["params"][0][mask].requires_grad_(True)).pin_memory()
+                    )
+                    self.optimizer.state[group["params"][0]] = stored_state
+                    
+                    if "momentum_buffer" in stored_state:
+                        assert self.optimizer.state[group["params"][0]]["momentum_buffer"].is_pinned() == False, "momentum_buffer should be in pageable memory"
+                    if "exp_avg" in stored_state:
+                        assert self.optimizer.state[group["params"][0]]["exp_avg"].is_pinned() == False, "exp_avg should be in pageable memory"
+                    if "exp_avg_sq" in stored_state:
+                        assert self.optimizer.state[group["params"][0]]["exp_avg_sq"].is_pinned() == False, "exp_avg_sq should be in pageable memory"
+                else:
+                    group["params"][0] = nn.Parameter(
+                        (group["params"][0][mask].requires_grad_(True))
+                    )
+                    self.optimizer.state[group["params"][0]] = stored_state
 
                 optimizable_tensors[group["name"]] = group["params"][0]
             else:
-                group["params"][0] = nn.Parameter(
-                    group["params"][0][mask].requires_grad_(True)
-                )
+                if self.device == 'cpu' and self.mxw_debug == 'fused':
+                    group["params"][0] = nn.Parameter(
+                        group["params"][0][mask].requires_grad_(True).pin_memory()
+                    )
+                else:
+                    group["params"][0] = nn.Parameter(
+                        group["params"][0][mask].requires_grad_(True)
+                    )
                 optimizable_tensors[group["name"]] = group["params"][0]
         return optimizable_tensors
 
@@ -852,6 +891,14 @@ class GaussianModel:
         self.sum_visible_count_in_one_batch = self.sum_visible_count_in_one_batch[
             valid_points_mask
         ]
+        
+        if self.device == 'cpu' and self.mxw_debug == 'fused':
+            assert self._xyz.is_pinned(), "`[after prunning] self._xyz` is not in pinned memory"
+            assert self._scaling.is_pinned(), "`[after prunning] self._scaling` is not in pinned memory"
+            assert self._rotation.is_pinned(), "`[after prunning] self._rotation` is not in pinned memory"
+            assert self._opacity.is_pinned(), "`[after prunning] self._opacity` is not in pinned memory"
+            assert self._features_dc.is_pinned(), "`[after prunning] self._features_dc` is not in pinned memory"
+            assert self._features_rest.is_pinned(), "`[after prunning] self._features_rest` is not in pinned memory"
 
     def cat_tensors_to_optimizer(self, tensors_dict):
         optimizable_tensors = {}
@@ -882,20 +929,43 @@ class GaussianModel:
                     )
 
                 del self.optimizer.state[group["params"][0]]
-                group["params"][0] = nn.Parameter(
-                    torch.cat(
-                        (group["params"][0], extension_tensor), dim=0
-                    ).requires_grad_(True)
-                )
-                self.optimizer.state[group["params"][0]] = stored_state
+                
+                if self.device == 'cpu' and self.mxw_debug == 'fused':
+                    group["params"][0] = nn.Parameter(
+                        torch.cat(
+                            (group["params"][0], extension_tensor), dim=0
+                        ).requires_grad_(True).pin_memory()
+                    ) 
+                    self.optimizer.state[group["params"][0]] = stored_state
+                    
+                    if "momentum_buffer" in stored_state:
+                        assert self.optimizer.state.get(group["params"][0], None)["momentum_buffer"].is_pinned() == False, "momentum_buffer should be in pageable memory"
+                    if "exp_avg" in stored_state:
+                        assert self.optimizer.state.get(group["params"][0], None)["exp_avg"].is_pinned() == False, "exp_avg should be in pageable memory"
+                    if "exp_avg_sq" in stored_state:
+                        assert self.optimizer.state.get(group["params"][0], None)["exp_avg_sq"].is_pinned() == False, "exp_avg_sq should be in pageable memory"
+                else:
+                    group["params"][0] = nn.Parameter(
+                        torch.cat(
+                            (group["params"][0], extension_tensor), dim=0
+                        ).requires_grad_(True)
+                    )
+                    self.optimizer.state[group["params"][0]] = stored_state
 
                 optimizable_tensors[group["name"]] = group["params"][0]
             else:
-                group["params"][0] = nn.Parameter(
-                    torch.cat(
-                        (group["params"][0], extension_tensor), dim=0
-                    ).requires_grad_(True)
-                )
+                if self.device == 'cpu' and self.mxw_debug == 'fused':
+                    group["params"][0] = nn.Parameter(
+                        torch.cat(
+                            (group["params"][0], extension_tensor), dim=0
+                        ).requires_grad_(True).pin_memory()
+                    )
+                else:
+                    group["params"][0] = nn.Parameter(
+                        torch.cat(
+                            (group["params"][0], extension_tensor), dim=0
+                        ).requires_grad_(True)
+                    )
                 optimizable_tensors[group["name"]] = group["params"][0]
 
         return optimizable_tensors
@@ -937,6 +1007,14 @@ class GaussianModel:
         self.send_to_gpui_cnt = torch.cat(
             (self.send_to_gpui_cnt, new_send_to_gpui_cnt), dim=0
         )
+        
+        if self.device == 'cpu' and self.mxw_debug == 'fused':
+            assert self._xyz.is_pinned(), "`[after densification] self._xyz` is not in pinned memory"
+            assert self._scaling.is_pinned(), "`[after densification] self._scaling` is not in pinned memory"
+            assert self._rotation.is_pinned(), "`[after densification] self._rotation` is not in pinned memory"
+            assert self._opacity.is_pinned(), "`[after densification] self._opacity` is not in pinned memory"
+            assert self._features_dc.is_pinned(), "`[after densification] self._features_dc` is not in pinned memory"
+            assert self._features_rest.is_pinned(), "`[after densification] self._features_rest` is not in pinned memory"
 
     def densify_and_split(self, grads, grad_threshold, scene_extent, N=2):
         n_init_points = self.get_xyz.shape[0]

@@ -76,6 +76,7 @@ class AuxiliaryParams(ParamGroup):
         self.llffhold = 8
         self.backend = "default" # "default", "gsplat"
         self.offload = False
+        self.prealloc_capacity = 5_000_000
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):
