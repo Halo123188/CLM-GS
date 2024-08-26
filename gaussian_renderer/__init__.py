@@ -15,7 +15,9 @@ from diff_gaussian_rasterization import (
     GaussianRasterizationSettings,
     GaussianRasterizer,
     get_send2gpu,
-    send2gpu
+    send2gpu,
+    send_cat2gpu,
+    # send_cat2gpu_buffer
 )
 from gsplat import (
     rasterization,
@@ -1169,7 +1171,7 @@ def gsplat_distributed_preprocess3dgs_and_all2all_final(
             _features_rest = _features_rest.view(-1, _features_rest_dims[1], _features_rest_dims[2])
             if timers is not None:
                 timers.stop("Unpack parameters")   
-        elif args.mxw_debug == 'cat':
+        elif args.mxw_debug == 'deprecated':
             _opacities_dim1 = pc._opacity.shape[1]
             _scales_dim1 = pc._scaling.shape[1]
             _rotations_dim1 = pc._rotation.shape[1]
@@ -1215,6 +1217,21 @@ def gsplat_distributed_preprocess3dgs_and_all2all_final(
             _features_rest = _features_rest.view(-1, _features_rest_dim1, _features_rest_dim2)
             if timers is not None:
                 timers.stop("Unpack parameters")
+        elif args.mxw_debug == 'cat':
+            if timers is not None:
+                timers.start("Transfer parameters")
+            _opacities, _scales, _rotations, _features_dc, _features_rest = send_cat2gpu(
+                pc._parameters.detach(),
+                send2gpu_filter,
+                pc.param_dims,
+                pc.param_dims_presum_rshift,
+                pc.col2attr
+            )
+            #TODO: fix feautures shape
+            _features_dc = _features_dc.view(-1, 1, 3)
+            _features_rest = _features_rest.view(-1, 15, 3)
+            if timers is not None:
+                timers.stop("Transfer parameters")
         else:
         # elif args.mxw_debug == 'fused':
             if timers is not None:
@@ -1250,6 +1267,8 @@ def gsplat_distributed_preprocess3dgs_and_all2all_final(
         
         if timers is not None:
             timers.start("Cat shs")    
+        # print(_features_dc.shape)
+        # print(_features_rest.shape)
         shs = torch.cat([_features_dc, _features_rest], dim=1)
         if timers is not None:
             timers.stop("Cat shs")        

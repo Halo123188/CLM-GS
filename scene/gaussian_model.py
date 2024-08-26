@@ -52,6 +52,10 @@ class GaussianModel:
     def __init__(self, sh_degree: int, offload: bool, mxw_debug):
         self.active_sh_degree = 0
         self.max_sh_degree = sh_degree
+        self._parameters = torch.empty(0)
+        self.param_dims = torch.empty(0)
+        self.param_dims_presum_rshift = torch.empty(0)
+        self.col2attr = torch.empty(0)
         self._xyz = torch.empty(0)
         self._features_dc = torch.empty(0)
         self._features_rest = torch.empty(0)
@@ -236,6 +240,35 @@ class GaussianModel:
             self.sum_visible_count_in_one_batch = torch.zeros(
                 (self.get_xyz.shape[0]), device=self.device
             ) # TODO: Check where this param is used. If it's used for gpu, should stil init it there.
+        elif self.device == 'cpu' and self.mxw_debug == 'cat':
+            features_dc = features[:, :, 0:1].transpose(1, 2).contiguous().view(fused_point_cloud.shape[0], -1) # (N, 1, 3) -> (N, 3)
+            features_rest = features[:, :, 1:].transpose(1, 2).contiguous().view(fused_point_cloud.shape[0], -1) # (N, 15, 3) -> (N, 45)
+            dims = [fused_point_cloud.shape[1], opacities.shape[1], scales.shape[1], rots.shape[1], features_dc.shape[1], features_rest.shape[1]]
+            parameters = torch.empty((fused_point_cloud.shape[0], sum(dims)), pin_memory=True)          
+            torch.cat((fused_point_cloud, opacities, scales, rots, features_dc, features_rest), dim=1, out=parameters)
+            self._parameters = nn.Parameter(parameters.requires_grad_(True))
+            self._xyz, self._opacity, self._scaling, self._rotation, self._features_dc, self._features_rest = torch.split(self._parameters, dims, dim=1) 
+            self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device=self.device)
+            self.sum_visible_count_in_one_batch = torch.zeros(
+                (self.get_xyz.shape[0]), device=self.device
+            ) # TODO: Check where this param is used. If it's used for gpu, should stil init it there.
+            
+            self.param_dims = torch.tensor(dims, dtype=torch.int, device='cuda')
+            self.param_dims_presum_rshift = torch.cumsum(self.param_dims, dtype=torch.int, dim=0) - self.param_dims
+            self.col2attr = torch.empty((sum(dims),), dtype=torch.int, device='cuda')
+            for i in range(sum(dims)):
+                if i < self.param_dims_presum_rshift[1]:
+                    self.col2attr[i] = 0
+                elif i < self.param_dims_presum_rshift[2]:
+                    self.col2attr[i] = 1
+                elif i < self.param_dims_presum_rshift[3]:
+                    self.col2attr[i] = 2
+                elif i < self.param_dims_presum_rshift[4]:
+                    self.col2attr[i] = 3
+                elif i < self.param_dims_presum_rshift[5]:
+                    self.col2attr[i] = 4
+                else:
+                    self.col2attr[i] = 5
         else:
             self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
             self._features_dc = nn.Parameter(
@@ -274,41 +307,52 @@ class GaussianModel:
 
         args = utils.get_args()
         log_file = utils.get_log_file()
-
-        l = [
-            {
-                "params": [self._xyz],
-                "lr": training_args.position_lr_init
-                * self.spatial_lr_scale
-                * args.lr_scale_pos_and_scale,
-                "name": "xyz",
-            },
-            {
-                "params": [self._features_dc],
-                "lr": training_args.feature_lr,
-                "name": "f_dc",
-            },
-            {
-                "params": [self._features_rest],
-                "lr": training_args.feature_lr / 20.0,
-                "name": "f_rest",
-            },
-            {
-                "params": [self._opacity],
-                "lr": training_args.opacity_lr,
-                "name": "opacity",
-            },
-            {
-                "params": [self._scaling],
-                "lr": training_args.scaling_lr * args.lr_scale_pos_and_scale,
-                "name": "scaling",
-            },
-            {
-                "params": [self._rotation],
-                "lr": training_args.rotation_lr,
-                "name": "rotation",
-            },
-        ]
+        
+        if self.device == 'cpu' and self.mxw_debug == 'cat':
+            l = [
+                {
+                    "params": [self._parameters],
+                    "lr": training_args.position_lr_init
+                    * self.spatial_lr_scale
+                    * args.lr_scale_pos_and_scale,
+                    "name": "parameters"
+                }
+            ]
+        else:
+            l = [
+                {
+                    "params": [self._xyz],
+                    "lr": training_args.position_lr_init
+                    * self.spatial_lr_scale
+                    * args.lr_scale_pos_and_scale,
+                    "name": "xyz",
+                },
+                {
+                    "params": [self._features_dc],
+                    "lr": training_args.feature_lr,
+                    "name": "f_dc",
+                },
+                {
+                    "params": [self._features_rest],
+                    "lr": training_args.feature_lr / 20.0,
+                    "name": "f_rest",
+                },
+                {
+                    "params": [self._opacity],
+                    "lr": training_args.opacity_lr,
+                    "name": "opacity",
+                },
+                {
+                    "params": [self._scaling],
+                    "lr": training_args.scaling_lr * args.lr_scale_pos_and_scale,
+                    "name": "scaling",
+                },
+                {
+                    "params": [self._rotation],
+                    "lr": training_args.rotation_lr,
+                    "name": "rotation",
+                },
+            ]
 
         if utils.get_args().adam_type == "cpu_adam":
             self.optimizer = cpu_adam.CPUAdam(
@@ -840,7 +884,7 @@ class GaussianModel:
                     stored_state["exp_avg_sq"] = stored_state["exp_avg_sq"][mask]
 
                 del self.optimizer.state[group["params"][0]]
-                if self.device == 'cpu' and self.mxw_debug == 'fused':
+                if self.device == 'cpu' and (self.mxw_debug == 'fused' or self.mxw_debug == 'cat'):
                     group["params"][0] = nn.Parameter(
                         (group["params"][0][mask].requires_grad_(True)).pin_memory()
                     )
@@ -860,7 +904,7 @@ class GaussianModel:
 
                 optimizable_tensors[group["name"]] = group["params"][0]
             else:
-                if self.device == 'cpu' and self.mxw_debug == 'fused':
+                if self.device == 'cpu' and (self.mxw_debug == 'fused' or self.mxw_debug == 'cat'):
                     group["params"][0] = nn.Parameter(
                         group["params"][0][mask].requires_grad_(True).pin_memory()
                     )
@@ -874,13 +918,18 @@ class GaussianModel:
     def prune_points(self, mask):
         valid_points_mask = ~mask
         optimizable_tensors = self._prune_optimizer(valid_points_mask)
-
-        self._xyz = optimizable_tensors["xyz"]
-        self._features_dc = optimizable_tensors["f_dc"]
-        self._features_rest = optimizable_tensors["f_rest"]
-        self._opacity = optimizable_tensors["opacity"]
-        self._scaling = optimizable_tensors["scaling"]
-        self._rotation = optimizable_tensors["rotation"]
+        
+        if self.mxw_debug == 'cat':
+            self._parameters = optimizable_tensors["parameters"]
+            dims = [self._xyz.shape[1], self._opacity.shape[1], self._scaling.shape[1], self._rotation.shape[1], self._features_dc.shape[1], self._features_rest.shape[1]]           
+            self._xyz, self._opacity, self._scaling, self._rotation, self._features_dc, self._features_rest = torch.split(self._parameters, dims, dim=1)
+        else:
+            self._xyz = optimizable_tensors["xyz"]
+            self._features_dc = optimizable_tensors["f_dc"]
+            self._features_rest = optimizable_tensors["f_rest"]
+            self._opacity = optimizable_tensors["opacity"]
+            self._scaling = optimizable_tensors["scaling"]
+            self._rotation = optimizable_tensors["rotation"]
 
         self.xyz_gradient_accum = self.xyz_gradient_accum[valid_points_mask]
 
@@ -899,6 +948,8 @@ class GaussianModel:
             assert self._opacity.is_pinned(), "`[after prunning] self._opacity` is not in pinned memory"
             assert self._features_dc.is_pinned(), "`[after prunning] self._features_dc` is not in pinned memory"
             assert self._features_rest.is_pinned(), "`[after prunning] self._features_rest` is not in pinned memory"
+        elif self.device == 'cpu' and self.mxw_debug == 'cat':
+            assert self._parameters.is_pinned(), "`[after prunning] self._parameters` is not in pinned memory"
 
     def cat_tensors_to_optimizer(self, tensors_dict):
         optimizable_tensors = {}
@@ -930,7 +981,7 @@ class GaussianModel:
 
                 del self.optimizer.state[group["params"][0]]
                 
-                if self.device == 'cpu' and self.mxw_debug == 'fused':
+                if self.device == 'cpu' and (self.mxw_debug == 'fused' or self.mxw_debug == 'cat'):
                     group["params"][0] = nn.Parameter(
                         torch.cat(
                             (group["params"][0], extension_tensor), dim=0
@@ -979,23 +1030,34 @@ class GaussianModel:
         new_scaling,
         new_rotation,
         new_send_to_gpui_cnt,
+        new_parameters=None,
     ):
-        d = {
-            "xyz": new_xyz,
-            "f_dc": new_features_dc,
-            "f_rest": new_features_rest,
-            "opacity": new_opacities,
-            "scaling": new_scaling,
-            "rotation": new_rotation,
-        }
-
-        optimizable_tensors = self.cat_tensors_to_optimizer(d)
-        self._xyz = optimizable_tensors["xyz"]
-        self._features_dc = optimizable_tensors["f_dc"]
-        self._features_rest = optimizable_tensors["f_rest"]
-        self._opacity = optimizable_tensors["opacity"]
-        self._scaling = optimizable_tensors["scaling"]
-        self._rotation = optimizable_tensors["rotation"]
+        if self.mxw_debug == 'cat':
+            d = {
+                "parameters": new_parameters,
+            }
+            
+            optimizable_tensors = self.cat_tensors_to_optimizer(d)
+            self._parameters = optimizable_tensors["parameters"]
+            dims = [self._xyz.shape[1], self._opacity.shape[1], self._scaling.shape[1], self._rotation.shape[1], self._features_dc.shape[1], self._features_rest.shape[1]]           
+            self._xyz, self._opacity, self._scaling, self._rotation, self._features_dc, self._features_rest = torch.split(self._parameters, dims, dim=1)
+        else:
+            d = {
+                "xyz": new_xyz,
+                "f_dc": new_features_dc,
+                "f_rest": new_features_rest,
+                "opacity": new_opacities,
+                "scaling": new_scaling,
+                "rotation": new_rotation,
+            }
+            
+            optimizable_tensors = self.cat_tensors_to_optimizer(d)
+            self._xyz = optimizable_tensors["xyz"]
+            self._features_dc = optimizable_tensors["f_dc"]
+            self._features_rest = optimizable_tensors["f_rest"]
+            self._opacity = optimizable_tensors["opacity"]
+            self._scaling = optimizable_tensors["scaling"]
+            self._rotation = optimizable_tensors["rotation"]
 
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device=self.device)
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device=self.device)
@@ -1015,6 +1077,8 @@ class GaussianModel:
             assert self._opacity.is_pinned(), "`[after densification] self._opacity` is not in pinned memory"
             assert self._features_dc.is_pinned(), "`[after densification] self._features_dc` is not in pinned memory"
             assert self._features_rest.is_pinned(), "`[after densification] self._features_rest` is not in pinned memory"
+        elif self.device == 'cpu' and self.mxw_debug == 'cat':
+            assert self._parameters.is_pinned(), "[after densification] self._parameters` is not in pinned memory"
 
     def densify_and_split(self, grads, grad_threshold, scene_extent, N=2):
         n_init_points = self.get_xyz.shape[0]
@@ -1036,28 +1100,52 @@ class GaussianModel:
         utils.get_log_file().write(
             "Number of split gaussians: {}\n".format(selected_pts_mask.sum().item())
         )
-        rots = build_rotation(self._rotation[selected_pts_mask]).repeat(N, 1, 1)
-        new_xyz = torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1) + self.get_xyz[
-            selected_pts_mask
-        ].repeat(N, 1)
-        new_scaling = self.scaling_inverse_activation(
-            self.get_scaling[selected_pts_mask].repeat(N, 1) / (0.8 * N)
-        )
-        new_rotation = self._rotation[selected_pts_mask].repeat(N, 1)
-        new_features_dc = self._features_dc[selected_pts_mask].repeat(N, 1, 1)
-        new_features_rest = self._features_rest[selected_pts_mask].repeat(N, 1, 1)
-        new_opacity = self._opacity[selected_pts_mask].repeat(N, 1)
-        new_send_to_gpui_cnt = self.send_to_gpui_cnt[selected_pts_mask].repeat(N, 1)
-
-        self.densification_postfix(
-            new_xyz,
-            new_features_dc,
-            new_features_rest,
-            new_opacity,
-            new_scaling,
-            new_rotation,
-            new_send_to_gpui_cnt,
-        )
+        if self.mxw_debug == 'cat':
+            rots = build_rotation(self._rotation[selected_pts_mask]).repeat(N, 1, 1)
+            new_xyz = torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1) + self.get_xyz[
+                selected_pts_mask
+            ].repeat(N, 1)
+            new_scaling = self.scaling_inverse_activation(
+                self.get_scaling[selected_pts_mask].repeat(N, 1) / (0.8 * N)
+            )
+            new_parameters = self._parameters[selected_pts_mask].repeat(N, 1)
+            new_parameters[:, :self._xyz.shape[1]] = new_xyz
+            new_parameters[:, (self._xyz.shape[1] + self._opacity.shape[1]):(self._xyz.shape[1] + self._opacity.shape[1] + self._scaling.shape[1])] = new_scaling
+            new_send_to_gpui_cnt = self.send_to_gpui_cnt[selected_pts_mask].repeat(N, 1)
+            
+            self.densification_postfix(
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                new_send_to_gpui_cnt,
+                new_parameters,
+            )
+        else:
+            rots = build_rotation(self._rotation[selected_pts_mask]).repeat(N, 1, 1)
+            new_xyz = torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1) + self.get_xyz[
+                selected_pts_mask
+            ].repeat(N, 1)
+            new_scaling = self.scaling_inverse_activation(
+                self.get_scaling[selected_pts_mask].repeat(N, 1) / (0.8 * N)
+            )
+            new_rotation = self._rotation[selected_pts_mask].repeat(N, 1)
+            new_features_dc = self._features_dc[selected_pts_mask].repeat(N, 1, 1)
+            new_features_rest = self._features_rest[selected_pts_mask].repeat(N, 1, 1)
+            new_opacity = self._opacity[selected_pts_mask].repeat(N, 1)
+            new_send_to_gpui_cnt = self.send_to_gpui_cnt[selected_pts_mask].repeat(N, 1)
+            
+            self.densification_postfix(
+                new_xyz,
+                new_features_dc,
+                new_features_rest,
+                new_opacity,
+                new_scaling,
+                new_rotation,
+                new_send_to_gpui_cnt,
+            )
 
         prune_filter = torch.cat(
             (
@@ -1081,23 +1169,38 @@ class GaussianModel:
         utils.get_log_file().write(
             "Number of cloned gaussians: {}\n".format(selected_pts_mask.sum().item())
         )
-        new_xyz = self._xyz[selected_pts_mask]
-        new_features_dc = self._features_dc[selected_pts_mask]
-        new_features_rest = self._features_rest[selected_pts_mask]
-        new_opacities = self._opacity[selected_pts_mask]
-        new_scaling = self._scaling[selected_pts_mask]
-        new_rotation = self._rotation[selected_pts_mask]
-        new_send_to_gpui_cnt = self.send_to_gpui_cnt[selected_pts_mask]
+        if self.mxw_debug == 'cat':
+            new_parameters = self._parameters[selected_pts_mask]
+            new_send_to_gpui_cnt = self.send_to_gpui_cnt[selected_pts_mask]
+            
+            self.densification_postfix(
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                new_send_to_gpui_cnt,
+                new_parameters,
+            )
+        else:
+            new_xyz = self._xyz[selected_pts_mask]
+            new_features_dc = self._features_dc[selected_pts_mask]
+            new_features_rest = self._features_rest[selected_pts_mask]
+            new_opacities = self._opacity[selected_pts_mask]
+            new_scaling = self._scaling[selected_pts_mask]
+            new_rotation = self._rotation[selected_pts_mask]
+            new_send_to_gpui_cnt = self.send_to_gpui_cnt[selected_pts_mask]
 
-        self.densification_postfix(
-            new_xyz,
-            new_features_dc,
-            new_features_rest,
-            new_opacities,
-            new_scaling,
-            new_rotation,
-            new_send_to_gpui_cnt,
-        )
+            self.densification_postfix(
+                new_xyz,
+                new_features_dc,
+                new_features_rest,
+                new_opacities,
+                new_scaling,
+                new_rotation,
+                new_send_to_gpui_cnt,
+            )
 
     def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size):
         args = utils.get_args()
