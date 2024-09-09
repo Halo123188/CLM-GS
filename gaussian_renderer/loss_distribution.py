@@ -4,6 +4,7 @@ import torch.distributed as dist
 from utils.loss_utils import pixelwise_l1_with_mask, pixelwise_ssim_with_mask
 import time
 import diff_gaussian_rasterization
+import math
 
 
 def get_touched_tile_rect(touched_locally):
@@ -2565,15 +2566,23 @@ def final_system_loss_computation(
     timers.start("local_loss_computation")
     torch.cuda.synchronize()
     start_time = time.time()
-    pixelwise_Ll1 = pixelwise_l1_with_mask(
-        local_image_rect, local_image_rect_gt, local_image_rect_pixels_compute_locally
-    )
-    Ll1 = pixelwise_Ll1.sum() / (utils.get_num_pixels() * 3)
-    # utils.check_initial_gpu_memory_usage("after l1_loss")
-    pixelwise_ssim_loss = pixelwise_ssim_with_mask(
-        local_image_rect, local_image_rect_gt, local_image_rect_pixels_compute_locally
-    )
-    ssim_loss = pixelwise_ssim_loss.sum() / (utils.get_num_pixels() * 3)
+    
+    if args.offload and args.fused_loss:
+        pixelwise_Ll1, pixelwise_ssim_loss = diff_gaussian_rasterization.fused_loss_computation(
+            local_image_rect, local_image_rect_gt, local_image_rect_pixels_compute_locally
+        )
+        Ll1 = pixelwise_Ll1.sum() / (utils.get_num_pixels() * 3)
+        ssim_loss = pixelwise_ssim_loss.sum() / (utils.get_num_pixels() * 3)
+    else:
+        pixelwise_Ll1 = pixelwise_l1_with_mask(
+            local_image_rect, local_image_rect_gt, local_image_rect_pixels_compute_locally
+        )
+        Ll1 = pixelwise_Ll1.sum() / (utils.get_num_pixels() * 3)
+        # utils.check_initial_gpu_memory_usage("after l1_loss")
+        pixelwise_ssim_loss = pixelwise_ssim_with_mask(
+            local_image_rect, local_image_rect_gt, local_image_rect_pixels_compute_locally
+        )
+        ssim_loss = pixelwise_ssim_loss.sum() / (utils.get_num_pixels() * 3)
 
     torch.cuda.synchronize()
     statistic_collector["forward_loss_time"] = (time.time() - start_time) * 1000
