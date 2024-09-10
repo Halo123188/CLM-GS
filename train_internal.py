@@ -30,6 +30,7 @@ from densification import densification, gsplat_densification
 from diff_gaussian_rasterization import (
     send2cpu,
     send2cpu_cat_buffer,
+    send2cpu_cat_buffer_osr_shs,
 )
 
 def training(dataset_args, opt_args, pipe_args, args, log_file):
@@ -251,7 +252,52 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
         
         with torch.no_grad():
             # Sync grad with cpu.
-            if args.offload:
+            if args.offload and args.exact_filter:
+                if args.mxw_debug == 'cat':
+                    means3D_all, means3D, opacities, scales, rotations, shs = batched_screenspace_pkg["param_handles"]
+                    (infrustum_radii_opacities_filter_indices, send2gpu_final_filter_indices) = batched_screenspace_pkg["send2gpu_filter"]
+
+                    timers.start("zero out grads")
+                    N = gaussians._xyz.shape[0]
+                    parameters_grad_buffer[:N, :].zero_()
+                    timers.stop("zero out grads")
+
+                    timers.start("fused grad transfer")
+                    param_dims = torch.tensor([3, 1, 3, 4, 48], device="cuda", dtype=torch.int32)
+                    param_dims_presum_rshift = torch.tensor([0, 3, 4, 7, 11], device="cuda", dtype=torch.int32)
+                    col2attr = torch.tensor([0, 0, 0, 1, 2, 2, 2, 3, 3, 3, 3] + [4] * 48, device="cuda", dtype=torch.int32)
+                    send2cpu_cat_buffer_osr_shs(
+                        means3D.grad,
+                        opacities.grad,
+                        scales.grad,
+                        rotations.grad,
+                        shs.grad,
+                        infrustum_radii_opacities_filter_indices,
+                        send2gpu_final_filter_indices,
+                        param_dims,
+                        param_dims_presum_rshift,
+                        col2attr,
+                        parameters_grad_buffer[:N, :],
+                    ) # This kernel blocks the cpu.
+                    timers.stop("fused grad transfer")
+
+                    # Free grads on gpu
+                    means3D.grad = None
+                    opacities.grad = None
+                    scales.grad = None
+                    rotations.grad = None
+                    shs.grad = None
+                    
+                    del means3D, opacities, scales, rotations, shs
+                    
+                    timers.start("load from buffer")
+                    gaussians._parameters.grad = parameters_grad_buffer[:N, :]
+                    timers.stop("load from buffer")                     
+                    pass
+                else:
+                    assert False, "Not implemented yet."
+
+            elif args.offload:
                 timers.start("sync_grad_to_cpu")
                 if args.mxw_debug == 'fused':                    
                     timers.start("get all handles")

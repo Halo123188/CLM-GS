@@ -110,27 +110,52 @@ def gsplat_densification(iteration, scene, gaussians, batched_screenspace_pkg, o
                 ],
             )
         ):
-            if args.offload:
-                radii = radii.cpu()
-                visibility_filter = visibility_filter.cpu()
-                batched_grad = batched_screenspace_mean2D_grad[i].cpu()
-                
-                send2gpu_visibility_filter = torch.full_like(gaussians.max_radii2D, False, dtype=torch.bool, device="cpu")
-                send2gpu_visibility_filter[send2gpu_filter] = visibility_filter
+            if args.offload and args.exact_filter:
+                if args.mxw_debug == 'cat':
+                    (infrustum_radii_opacities_filter_indices, send2gpu_final_filter_indices) = send2gpu_filter
+                    
+                    radii_cpu = radii.cpu() # (len(send2gpu_final_filter_indices), )
+                    assert radii.shape[0] == send2gpu_final_filter_indices.shape[0], "radii.shape[0] != send2gpu_final_filter_indices.shape[0]"
+
+                    send2gpu_final_filter_indices_cpu = send2gpu_final_filter_indices.cpu() # (len(send2gpu_final_filter_indices), )
+                    batched_grad_cpu = batched_screenspace_mean2D_grad[i].cpu() # (len(send2gpu_final_filter_indices), 3)
+                    
+                    gaussians.max_radii2D[send2gpu_final_filter_indices_cpu] = torch.max(
+                        gaussians.max_radii2D[send2gpu_final_filter_indices_cpu], radii_cpu
+                    )
+
+                    gaussians.gsplat_add_densification_stats_exact_filter(
+                        batched_grad_cpu,
+                        send2gpu_final_filter_indices_cpu,
+                        image_width,
+                        image_height,
+                    )
+
+                else:
+                    assert False, "Not implemented yet"
+
             else:
-                batched_grad = batched_screenspace_mean2D_grad[i]
-                send2gpu_visibility_filter = visibility_filter
-                
-            gaussians.max_radii2D[send2gpu_visibility_filter] = torch.max(
-                gaussians.max_radii2D[send2gpu_visibility_filter], radii[visibility_filter]
-            )
-            gaussians.gsplat_add_densification_stats(
-                batched_grad,
-                send2gpu_visibility_filter,
-                visibility_filter,
-                image_width,
-                image_height,
-            )
+                if args.offload:
+                    radii = radii.cpu()
+                    visibility_filter = visibility_filter.cpu()
+                    batched_grad = batched_screenspace_mean2D_grad[i].cpu()
+                    
+                    send2gpu_visibility_filter = torch.full_like(gaussians.max_radii2D, False, dtype=torch.bool, device="cpu")
+                    send2gpu_visibility_filter[send2gpu_filter] = visibility_filter
+                else:
+                    batched_grad = batched_screenspace_mean2D_grad[i]
+                    send2gpu_visibility_filter = visibility_filter
+                    
+                gaussians.max_radii2D[send2gpu_visibility_filter] = torch.max(
+                    gaussians.max_radii2D[send2gpu_visibility_filter], radii[visibility_filter]
+                )
+                gaussians.gsplat_add_densification_stats(
+                    batched_grad,
+                    send2gpu_visibility_filter,
+                    visibility_filter,
+                    image_width,
+                    image_height,
+                )
         timers.stop("densification_update_stats")
 
         if iteration > args.densify_from_iter and utils.check_update_at_this_iter(

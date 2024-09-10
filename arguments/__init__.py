@@ -175,6 +175,8 @@ class DistributionParams(ParamGroup):
 
         self.adam_type = "default_adam"  # "default_adam", "cpu_adam"
 
+        self.exact_filter = False
+
         super().__init__(parser, "Distribution Parameters")
 
 

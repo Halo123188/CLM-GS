@@ -17,6 +17,10 @@ from diff_gaussian_rasterization import (
     get_send2gpu,
     send2gpu,
     send_cat2gpu,
+    send_cat2gpu_xyz,
+    send_cat2gpu_osr,
+    send_cat2gpu_shs
+    # get_exact_send2gpu_filter,
     # send_cat2gpu_buffer
 )
 from gsplat import (
@@ -1073,7 +1077,7 @@ def gsplat_distributed_preprocess3dgs_and_all2all_final(
     param_handles = []
     send2gpu_filter = None  
     send2gpu_filter_cpu = None  
-    if offload:
+    if offload and not args.exact_filter:
         if timers is not None:
             timers.start("Update means3D_all")
         # TODO: Optimizate this: use send2gpu_filter from prev iter to load only updated means3D
@@ -1110,7 +1114,6 @@ def gsplat_distributed_preprocess3dgs_and_all2all_final(
             timers.stop("Move filter")
             
         N = means3D.shape[0]
-        args = utils.get_args()
         iteration = utils.get_cur_iter()
         log_file = utils.get_log_file()
         if (iteration % args.log_interval) == 1:
@@ -1287,7 +1290,62 @@ def gsplat_distributed_preprocess3dgs_and_all2all_final(
         sh_degree = pc.active_sh_degree
         if timers is not None:
             timers.stop("Activate sh degree")
-            
+    elif offload and args.exact_filter:
+
+        if args.mxw_debug == 'cat':
+
+            assert pc._parameters.is_contiguous() and pc._parameters.is_pinned(), "pc._parameters must be contiguous and pinned."
+
+            if timers is not None:
+                timers.start("send_cat2gpu_xyz")
+            means3D_all = send_cat2gpu_xyz(
+                pc._parameters.detach()
+            )
+            if timers is not None:
+                timers.stop("send_cat2gpu_xyz")
+
+            # TODO: Currently only works with bsz=1.
+            viewmatrix = batched_viewpoint_cameras[0].world_view_transform
+            projmatrix = batched_viewpoint_cameras[0].full_proj_transform
+            if timers is not None:
+                timers.start("infrustum_filter")
+            infrustum_filter = get_send2gpu(means3D_all, viewmatrix, projmatrix) # (N, ) bool
+            infrustum_filter_indices = torch.nonzero(infrustum_filter).squeeze(1)
+            # print("infrustum_filter_indices: ", infrustum_filter_indices.cpu().numpy().tolist())
+            means3D = means3D_all[infrustum_filter_indices].detach()
+            if timers is not None:
+                timers.stop("infrustum_filter")
+
+            if timers is not None:
+                timers.start("send_cat2gpu_osr")
+            osr_param_dims = torch.tensor([1, 3, 4], device="cuda", dtype=torch.int32)
+            osr_param_dims_presum_rshift = torch.tensor([0, 1, 4], device="cuda", dtype=torch.int32)
+            osr_col2attr = torch.tensor([0, 1, 1, 1, 2, 2, 2, 2], device="cuda", dtype=torch.int32)
+            _opacities, _scales, _rotations = send_cat2gpu_osr(
+                pc._parameters.detach(),
+                infrustum_filter,
+                infrustum_filter_indices,
+                osr_param_dims,
+                osr_param_dims_presum_rshift,
+                osr_col2attr
+            )
+            if timers is not None:
+                timers.stop("send_cat2gpu_osr")
+
+            if timers is not None:
+                timers.start("Activate params: _opacities, scale and rotation")
+            means3D = means3D.requires_grad_(True)
+            _opacities = _opacities.requires_grad_(True)
+            _scales = _scales.requires_grad_(True)
+            _rotations = _rotations.requires_grad_(True)
+            opacities = pc.opacity_activation(_opacities)
+            scales = pc.scaling_activation(_scales) # * scaling_modifier
+            rotations = pc.rotation_activation(_rotations)
+            if timers is not None:
+                timers.stop("Activate params: _opacities, scale and rotation")
+        else:
+            assert False, "Not implemented yet."
+
     else:
         means3D = pc.get_xyz
         opacities = pc.get_opacity
@@ -1354,20 +1412,104 @@ def gsplat_distributed_preprocess3dgs_and_all2all_final(
             packed=False,
         )
     )
-    batched_opacities = opacities.squeeze(1).repeat(B, 1)  # (N, 1) -> (B, N)
+    if offload and args.exact_filter:
+        if args.mxw_debug == 'cat':
 
-    if mode == "train":
-        batched_means2D.retain_grad()
+            assert B == 1, "bsz must be 1."
+            # print("batched_radiis.shape: ", batched_radiis.shape)
+            # print("opacities.shape: ", opacities.shape)
+            # infrustum_filter_indices
 
-    # Compute colors(shs) for each camera view.
-    shs = shs.expand(B, *([-1] * shs.dim()))
+            infrustum_radii_opacities_filter = (batched_radiis[0, :] > 0) & (opacities[:, 0] > 1.0 / 255.0) # (N, )
+            infrustum_radii_opacities_filter_indices = torch.nonzero(infrustum_radii_opacities_filter).squeeze(1) # (n_select, )
+            # print("infrustum_radii_opacities_filter_indices.shape: ", infrustum_radii_opacities_filter_indices.shape)
+            send2gpu_final_filter_indices = infrustum_filter_indices[infrustum_radii_opacities_filter_indices]
 
-    camtoworlds = torch.inverse(batched_viewmats)
-    dirs = means3D[None, :, :] - camtoworlds[:, None, :3, 3]
-    batched_colors = spherical_harmonics(
-        degrees_to_use=sh_degree, dirs=dirs, coeffs=shs, masks=(batched_radiis > 0)
-    )
-    batched_colors = torch.clamp_min(batched_colors + 0.5, 0.0)  # (B, N, 3)
+            iteration = utils.get_cur_iter()
+            log_file = utils.get_log_file()
+            if (iteration % args.log_interval) == 1:
+                log_file.write(
+                    "<<< # iteration: {}, infrustum_filter_indices = {}/{} ({:.2f}%), send2gpu_final_filter = {}/{} ({:.2f}%)>>>\n".format(iteration,
+                        infrustum_filter_indices.shape[0],
+                        means3D_all.shape[0],
+                        (100 * infrustum_filter_indices.shape[0] / means3D_all.shape[0]),
+                        send2gpu_final_filter_indices.shape[0],
+                        means3D_all.shape[0],
+                        (100 * send2gpu_final_filter_indices.shape[0] / means3D_all.shape[0])
+                    )
+                )
+            
+            if timers is not None:
+                timers.start("slicing infrustum_radii_opacities_filter_indices")
+            # infrustum_radii_opacities_filter_indices: (N, )
+            n_selectecd = infrustum_radii_opacities_filter_indices.shape[0]
+            batched_radiis = torch.gather(batched_radiis, # (1, N)
+                                          1, infrustum_radii_opacities_filter_indices.reshape(1, n_selectecd))
+            batched_means2D = torch.gather(batched_means2D,  # (1, N, 2)
+                                           1, infrustum_radii_opacities_filter_indices.reshape(1, n_selectecd, 1).expand(1, n_selectecd, 2))
+            batched_depths = torch.gather(batched_depths,  # (1, N)
+                                          1, infrustum_radii_opacities_filter_indices.reshape(1, n_selectecd))
+            batched_conics = torch.gather(batched_conics,  # (1, N, 3)
+                                          1, infrustum_radii_opacities_filter_indices.reshape(1, n_selectecd, 1).expand(1, n_selectecd, 3))
+            opacities = torch.gather(opacities,  # (N, 1)
+                                    0, infrustum_radii_opacities_filter_indices.reshape(n_selectecd, 1))
+            batched_opacities = opacities.squeeze(1).unsqueeze(0) # (N, 1) -> (1, N)
+            if timers is not None:
+                timers.stop("slicing infrustum_radii_opacities_filter_indices")
+
+            if mode == "train":
+                batched_means2D.retain_grad()
+
+            if timers is not None:
+                timers.start("send_cat2gpu_shs")
+            shs = send_cat2gpu_shs(
+                pc._parameters.detach(),
+                send2gpu_final_filter_indices,
+            ) # (N, 48)
+            shs = shs.requires_grad_(True)
+            sh_degree = pc.active_sh_degree
+            if timers is not None:
+                timers.stop("send_cat2gpu_shs")
+
+            if timers is not None:
+                timers.start("Append handles")
+            param_handles.append(means3D_all) # (N, 3)
+            param_handles.append(means3D)  # (len(infrustum_filter_indices), 3)
+            param_handles.append(_opacities)  # (len(infrustum_filter_indices), 1)
+            param_handles.append(_scales) # (len(infrustum_filter_indices), 3)
+            param_handles.append(_rotations) # (len(infrustum_filter_indices), 4)
+            param_handles.append(shs) # (len(infrustum_radii_opacities_filter_indices), 16, 3)
+            if timers is not None:
+                timers.stop("Append handles")
+            
+            send2gpu_filter = (infrustum_radii_opacities_filter_indices, send2gpu_final_filter_indices)
+            send2gpu_filter_cpu = None
+
+            camtoworlds = torch.inverse(batched_viewmats)
+            dirs = means3D[None, infrustum_radii_opacities_filter_indices, :] - camtoworlds[:, None, :3, 3]
+            shs = shs.reshape(1, n_selectecd, 16, 3)
+            batched_colors = spherical_harmonics(
+                degrees_to_use=sh_degree, dirs=dirs, coeffs=shs, masks=(batched_radiis > 0)
+            )
+            batched_colors = torch.clamp_min(batched_colors + 0.5, 0.0)  # (B, N, 3)
+
+        else:
+            assert False, "Not implemented yet."
+    else:
+        batched_opacities = opacities.squeeze(1).repeat(B, 1)  # (N, 1) -> (B, N)
+
+        if mode == "train":
+            batched_means2D.retain_grad()
+
+        # Compute colors(shs) for each camera view.
+        shs = shs.expand(B, *([-1] * shs.dim()))
+
+        camtoworlds = torch.inverse(batched_viewmats)
+        dirs = means3D[None, :, :] - camtoworlds[:, None, :3, 3]
+        batched_colors = spherical_harmonics(
+            degrees_to_use=sh_degree, dirs=dirs, coeffs=shs, masks=(batched_radiis > 0)
+        )
+        batched_colors = torch.clamp_min(batched_colors + 0.5, 0.0)  # (B, N, 3)
 
     utils.check_initial_gpu_memory_usage("after forward_preprocess_gaussians")
     if timers is not None:
