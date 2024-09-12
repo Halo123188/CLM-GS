@@ -1,4 +1,5 @@
 import torch
+import torch.nn as nn
 import utils.general_utils as utils
 import torch.distributed as dist
 from utils.loss_utils import pixelwise_l1_with_mask, pixelwise_ssim_with_mask
@@ -6,6 +7,19 @@ import time
 import diff_gaussian_rasterization
 import math
 
+class FinalLoss(nn.Module):
+    def __init__(self):
+        super().__init__()
+    
+    def forward(self, image, image_gt, mask):
+        pixelwise_Ll1 = pixelwise_l1_with_mask(image, image_gt, mask)
+        Ll1 = pixelwise_Ll1.sum() / (utils.get_num_pixels() * 3)
+        pixelwise_ssim_loss = pixelwise_ssim_with_mask(image, image_gt, mask)
+        ssim_loss = pixelwise_ssim_loss.sum() / (utils.get_num_pixels() * 3)
+        
+        return Ll1, ssim_loss
+
+COMPILED_LOSS_MODULE = torch.compile(FinalLoss())
 
 def get_touched_tile_rect(touched_locally):
     nonzero_pos = touched_locally.nonzero()
@@ -2567,12 +2581,15 @@ def final_system_loss_computation(
     torch.cuda.synchronize()
     start_time = time.time()
     
-    if args.offload and args.fused_loss:
+    if args.offload and args.fused_loss == 'hand_written':
         pixelwise_Ll1, pixelwise_ssim_loss = diff_gaussian_rasterization.fused_loss_computation(
             local_image_rect, local_image_rect_gt, local_image_rect_pixels_compute_locally
         )
         Ll1 = pixelwise_Ll1.sum() / (utils.get_num_pixels() * 3)
         ssim_loss = pixelwise_ssim_loss.sum() / (utils.get_num_pixels() * 3)
+    elif args.offload and args.fused_loss == 'torch_compile':
+        global COMPILED_LOSS_MODULE
+        Ll1, ssim_loss = COMPILED_LOSS_MODULE(local_image_rect, local_image_rect_gt, local_image_rect_pixels_compute_locally)
     else:
         pixelwise_Ll1 = pixelwise_l1_with_mask(
             local_image_rect, local_image_rect_gt, local_image_rect_pixels_compute_locally

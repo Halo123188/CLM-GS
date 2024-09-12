@@ -1664,6 +1664,7 @@ def render_final(batched_screenspace_pkg, batched_strategies, tile_size=16):
     ########## [END] CUDA Rasterization Call ##########
     return batched_rendered_image, batched_compute_locally
 
+max_num_intersection = 0
 
 def gsplat_render_final(batched_screenspace_pkg, batched_strategies, tile_size=16):
     """
@@ -1707,12 +1708,16 @@ def gsplat_render_final(batched_screenspace_pkg, batched_strategies, tile_size=1
             isect_ids, B, tile_width, tile_height
         )  # (B, tile_height, tile_width)
         
+        global max_num_intersection
+        num_intersection = isect_ids.shape[0]
+        max_num_intersection = max(max_num_intersection, num_intersection)
+        
         args = utils.get_args()
         iteration = utils.get_cur_iter()
         log_file = utils.get_log_file()
         if (iteration % args.log_interval) == 1:
             log_file.write(
-                "<<< # iteration: {}, # intersections = {} >>>\n".format(iteration, isect_ids.shape[0])
+                "<<< # iteration: {}, # intersections = {}, max # intersections = {} >>>\n".format(iteration, num_intersection, max_num_intersection)
             )
 
         # TODO: One way to do load balancing: Add two timer operators before and after `rasterize_to_pixels`

@@ -77,7 +77,7 @@ class AuxiliaryParams(ParamGroup):
         self.backend = "default" # "default", "gsplat"
         self.offload = False
         self.prealloc_capacity = 5_000_000
-        self.fused_loss = False
+        self.fused_loss = "torch_compile" # "default", "hand_written", "torch_compile"
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):
