@@ -10,7 +10,7 @@
 	url = git@github.com:alexis-mmm/gsplat.git
 [submodule "submodules/cpu-adam"]
 	path = submodules/cpu-adam
-	url = https://github.com/TarzanZhao/cpu-adam.git
+	url = git@github.com:TarzanZhao/cpu-adam.git
 [submodule "submodules/fuse-ssim"]
 	path = submodules/fuse-ssim
-	url = https://github.com/TarzanZhao/fuse-ssim.git
+	url = git@github.com:TarzanZhao/fuse-ssim.git
