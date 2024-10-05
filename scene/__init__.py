@@ -13,10 +13,11 @@ import os
 import random
 import json
 from random import randint
+from torch.utils.data import Dataset
 from utils.system_utils import searchForMaxIteration
 from scene.dataset_readers import sceneLoadTypeCallbacks
 from scene.gaussian_model import GaussianModel
-from utils.camera_utils import cameraList_from_camInfos, camera_to_JSON
+from utils.camera_utils import cameraList_from_camInfos, camera_to_JSON, loadCam
 import utils.general_utils as utils
 
 
@@ -33,6 +34,7 @@ class Scene:
         self.model_path = args.model_path
         self.loaded_iter = None
         self.gaussians = gaussians
+        self.args = args
         log_file = utils.get_log_file()
 
         if load_iteration:
@@ -89,6 +91,7 @@ class Scene:
         utils.log_cpu_memory_usage("before decoding images")
 
         self.cameras_extent = scene_info.nerf_normalization["radius"]
+        self.scene_info = scene_info # For torch dataloader, save scene_info
 
         # Set image size to global variable
         orig_w, orig_h = (
@@ -120,6 +123,9 @@ class Scene:
             args.distributed_dataset_storage = False
 
         # Train on original resolution, no downsampling in our implementation.
+        # TODO: For simplicity, for now we use preloaded dataset for evaluation. Should use customized dataloader once fixed.
+        # If not using torch DataLoader, decode dataset and store it in memory.
+        # if not args.torch_dataloader:
         utils.print_rank_0("Decoding Training Cameras")
         self.train_cameras = None
         self.test_cameras = None
@@ -185,8 +191,22 @@ class Scene:
     def getTrainCameras(self):
         return self.train_cameras
 
+    def getTrainCamerasInfo(self):
+        if self.args.num_train_cameras >= 0:
+            train_cameras_info = self.scene_info.train_cameras[: self.args.num_train_cameras]
+        else:
+            train_cameras_info = self.scene_info.train_cameras
+        return train_cameras_info
+
     def getTestCameras(self):
         return self.test_cameras
+    
+    def getTestCamerasInfo(self):
+        if self.args.num_test_cameras >= 0:
+            test_cameras_info = self.scene_info.test_cameras[: self.args.num_test_cameras]
+        else:
+            test_cameras_info = self.scene_info.test_cameras
+        return test_cameras_info
 
     def log_scene_info_to_file(self, log_file, prefix_str=""):
 
@@ -277,6 +297,76 @@ class SceneDataset:
 
     def get_batched_cameras_from_idx(self, idx_list):
         return [self.cameras[i] for i in idx_list]
+
+    def update_losses(self, losses):
+        for loss in losses:
+            self.iteration_loss.append(loss)
+            if len(self.iteration_loss) % self.camera_size == 0:
+                self.epoch_loss.append(
+                    sum(self.iteration_loss[-self.camera_size :]) / self.camera_size
+                )
+                self.log_file.write(
+                    "epoch {} loss: {}\n".format(
+                        len(self.epoch_loss), self.epoch_loss[-1]
+                    )
+                )
+                self.iteration_loss = []
+
+def custom_collate_fn(batch):
+    return batch
+
+class TorchSceneDataset(Dataset):
+    def __init__(self, cameras_info):
+        self.cameras = cameras_info # `cameras` now contains only info, no image
+        self.camera_size = len(self.cameras)
+        self.sample_camera_idx = []
+        # for i in range(self.camera_size):
+        #     if self.cameras[i].original_image_backup is not None:
+        #         self.sample_camera_idx.append(i)
+        # print("Number of cameras with sample images: ", len(self.sample_camera_idx))
+
+        self.cur_epoch_cameras = []
+        self.cur_iteration = 0
+
+        self.iteration_loss = []
+        self.epoch_loss = []
+
+        self.log_file = utils.get_log_file()
+        self.args = utils.get_args()
+
+        self.last_time_point = None
+        self.epoch_time = []
+        self.epoch_n_sample = []
+    
+    def __len__(self):
+        return self.camera_size
+
+    def __getitem__(self, id):
+        #TODO: arg `id` in `loadCam()` is supposed to be the index inside a batch, not the global index in dataset. Passing `id` is meaningless.
+        return loadCam(
+            self.args,
+            id,
+            self.cameras[id],
+            decompressed_image=None,
+            return_image=False,
+        )
+
+    @property 
+    def cur_epoch(self):
+        return len(self.epoch_loss)
+
+    @property
+    def cur_iteration_in_epoch(self):
+        return len(self.iteration_loss)
+
+    def get_batched_cameras(self, batch_size):
+        assert False, "Not implemented with torch DataLoader."
+
+    def get_batched_cameras_idx(self, batch_size):
+        assert False, "Not implemented with torch DataLoader."
+
+    def get_batched_cameras_from_idx(self, idx_list):
+        assert False, "Not implemented with torch DataLoader."
 
     def update_losses(self, losses):
         for loss in losses:

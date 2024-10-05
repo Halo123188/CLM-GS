@@ -286,14 +286,17 @@ class GaussianModel:
             ) # TODO: Check where this param is used. If it's used for gpu, should stil init it there.
 
     def all_parameters(self):
-        return [
-            self._xyz,
-            self._features_dc,
-            self._features_rest,
-            self._scaling,
-            self._rotation,
-            self._opacity,
-        ]
+        if self.device == 'cpu' and self.mxw_debug == 'cat':
+            return [self._parameters]
+        else:
+            return [
+                self._xyz,
+                self._features_dc,
+                self._features_rest,
+                self._scaling,
+                self._rotation,
+                self._opacity,
+            ]
 
     def training_setup(self, training_args):
         self.percent_dense = training_args.percent_dense
@@ -422,6 +425,15 @@ class GaussianModel:
                 assert (
                     False
                 ), f"lr_scale_mode {training_args.lr_scale_mode} not supported."
+        
+        if utils.get_args().adam_type == "cpu_adam" and self.device == 'cpu' and self.mxw_debug == 'cat':
+            if training_args.lr_scale_mode == "linear":
+                lr_scale = bsz
+                self.optimizer.columns_lr *= lr_scale
+            elif training_args.lr_scale_mode == "sqrt":
+                lr_scale = np.sqrt(bsz)
+                self.optimizer.columns_lr *= lr_scale
+            
 
         self.xyz_scheduler_args = get_expon_lr_func(
             lr_init=training_args.position_lr_init

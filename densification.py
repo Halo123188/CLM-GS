@@ -85,7 +85,7 @@ def densification(iteration, scene, gaussians, batched_screenspace_pkg):
             )
 
 
-def gsplat_densification(iteration, scene, gaussians, batched_screenspace_pkg, offload=False):
+def gsplat_densification(iteration, scene, gaussians, batched_screenspace_pkg, offload=False, stat_only=False, densify_only=False):
     args = utils.get_args()
     timers = utils.get_timers()
     log_file = utils.get_log_file()
@@ -95,121 +95,123 @@ def gsplat_densification(iteration, scene, gaussians, batched_screenspace_pkg, o
         # Keep track of max radii in image-space for pruning
         timers.start("densification")
 
-        timers.start("densification_update_stats")
-        image_width = batched_screenspace_pkg["image_width"]
-        image_height = batched_screenspace_pkg["image_height"]
-        send2gpu_filter = batched_screenspace_pkg["send2gpu_filter"]
-        batched_screenspace_mean2D_grad = batched_screenspace_pkg[
-            "batched_locally_preprocessed_mean2D"
-        ].grad
-        for i, (radii, visibility_filter) in enumerate(
-            zip(
-                batched_screenspace_pkg["batched_locally_preprocessed_radii"],
-                batched_screenspace_pkg[
-                    "batched_locally_preprocessed_visibility_filter"
-                ],
-            )
-        ):
-            if args.offload and args.exact_filter:
-                if args.mxw_debug == 'cat':
-                    (infrustum_radii_opacities_filter_indices, send2gpu_final_filter_indices) = send2gpu_filter
-                    
-                    radii_cpu = radii.cpu() # (len(send2gpu_final_filter_indices), )
-                    assert radii.shape[0] == send2gpu_final_filter_indices.shape[0], "radii.shape[0] != send2gpu_final_filter_indices.shape[0]"
+        if not densify_only:
+            timers.start("densification_update_stats")
+            image_width = batched_screenspace_pkg["image_width"]
+            image_height = batched_screenspace_pkg["image_height"]
+            send2gpu_filter = batched_screenspace_pkg["send2gpu_filter"]
+            batched_screenspace_mean2D_grad = batched_screenspace_pkg[
+                "batched_locally_preprocessed_mean2D"
+            ].grad
+            for i, (radii, visibility_filter) in enumerate(
+                zip(
+                    batched_screenspace_pkg["batched_locally_preprocessed_radii"],
+                    batched_screenspace_pkg[
+                        "batched_locally_preprocessed_visibility_filter"
+                    ],
+                )
+            ):
+                if args.offload and args.exact_filter:
+                    if args.mxw_debug == 'cat':
+                        (infrustum_radii_opacities_filter_indices, send2gpu_final_filter_indices) = send2gpu_filter
+                        
+                        radii_cpu = radii.cpu() # (len(send2gpu_final_filter_indices), )
+                        assert radii.shape[0] == send2gpu_final_filter_indices.shape[0], "radii.shape[0] != send2gpu_final_filter_indices.shape[0]"
 
-                    send2gpu_final_filter_indices_cpu = send2gpu_final_filter_indices.cpu() # (len(send2gpu_final_filter_indices), )
-                    batched_grad_cpu = batched_screenspace_mean2D_grad[i].cpu() # (len(send2gpu_final_filter_indices), 3)
-                    
-                    gaussians.max_radii2D[send2gpu_final_filter_indices_cpu] = torch.max(
-                        gaussians.max_radii2D[send2gpu_final_filter_indices_cpu], radii_cpu
+                        send2gpu_final_filter_indices_cpu = send2gpu_final_filter_indices.cpu() # (len(send2gpu_final_filter_indices), )
+                        batched_grad_cpu = batched_screenspace_mean2D_grad[i].cpu() # (len(send2gpu_final_filter_indices), 3)
+                        
+                        gaussians.max_radii2D[send2gpu_final_filter_indices_cpu] = torch.max(
+                            gaussians.max_radii2D[send2gpu_final_filter_indices_cpu], radii_cpu
+                        )
+
+                        gaussians.gsplat_add_densification_stats_exact_filter(
+                            batched_grad_cpu,
+                            send2gpu_final_filter_indices_cpu,
+                            image_width,
+                            image_height,
+                        )
+
+                    else:
+                        assert False, "Not implemented yet"
+
+                else:
+                    if args.offload:
+                        radii = radii.cpu()
+                        visibility_filter = visibility_filter.cpu()
+                        batched_grad = batched_screenspace_mean2D_grad[i].cpu()
+                        
+                        send2gpu_visibility_filter = torch.full_like(gaussians.max_radii2D, False, dtype=torch.bool, device="cpu")
+                        send2gpu_visibility_filter[send2gpu_filter] = visibility_filter
+                    else:
+                        batched_grad = batched_screenspace_mean2D_grad[i]
+                        send2gpu_visibility_filter = visibility_filter
+                        
+                    gaussians.max_radii2D[send2gpu_visibility_filter] = torch.max(
+                        gaussians.max_radii2D[send2gpu_visibility_filter], radii[visibility_filter]
                     )
-
-                    gaussians.gsplat_add_densification_stats_exact_filter(
-                        batched_grad_cpu,
-                        send2gpu_final_filter_indices_cpu,
+                    gaussians.gsplat_add_densification_stats(
+                        batched_grad,
+                        send2gpu_visibility_filter,
+                        visibility_filter,
                         image_width,
                         image_height,
                     )
+            timers.stop("densification_update_stats")
+        
+        if not stat_only:
+            if iteration > args.densify_from_iter and utils.check_update_at_this_iter(
+                iteration, args.bsz, args.densification_interval, 0
+            ):
+                assert (
+                    args.stop_update_param == False
+                ), "stop_update_param must be false for densification; because it is a flag for debugging."
+                # utils.print_rank_0("iteration: {}, bsz: {}, update_interval: {}, update_residual: {}".format(iteration, args.bsz, args.densification_interval, 0))
 
-                else:
-                    assert False, "Not implemented yet"
+                gaussians.optimizer.zero_grad(set_to_none=True) # free old tensors' grads before densification
 
-            else:
-                if args.offload:
-                    radii = radii.cpu()
-                    visibility_filter = visibility_filter.cpu()
-                    batched_grad = batched_screenspace_mean2D_grad[i].cpu()
-                    
-                    send2gpu_visibility_filter = torch.full_like(gaussians.max_radii2D, False, dtype=torch.bool, device="cpu")
-                    send2gpu_visibility_filter[send2gpu_filter] = visibility_filter
-                else:
-                    batched_grad = batched_screenspace_mean2D_grad[i]
-                    send2gpu_visibility_filter = visibility_filter
-                    
-                gaussians.max_radii2D[send2gpu_visibility_filter] = torch.max(
-                    gaussians.max_radii2D[send2gpu_visibility_filter], radii[visibility_filter]
+                timers.start("densify_and_prune")
+                size_threshold = 20 if iteration > args.opacity_reset_interval else None
+                gaussians.densify_and_prune(
+                    args.densify_grad_threshold,
+                    args.min_opacity,
+                    scene.cameras_extent,
+                    size_threshold,
                 )
-                gaussians.gsplat_add_densification_stats(
-                    batched_grad,
-                    send2gpu_visibility_filter,
-                    visibility_filter,
-                    image_width,
-                    image_height,
-                )
-        timers.stop("densification_update_stats")
+                timers.stop("densify_and_prune")
 
-        if iteration > args.densify_from_iter and utils.check_update_at_this_iter(
-            iteration, args.bsz, args.densification_interval, 0
-        ):
-            assert (
-                args.stop_update_param == False
-            ), "stop_update_param must be false for densification; because it is a flag for debugging."
-            # utils.print_rank_0("iteration: {}, bsz: {}, update_interval: {}, update_residual: {}".format(iteration, args.bsz, args.densification_interval, 0))
+                # redistribute after densify_and_prune, because we have new gaussians to distribute evenly.
+                if utils.get_denfify_iter() % args.redistribute_gaussians_frequency == 0:
+                    num_3dgs_before_redistribute = gaussians.get_xyz.shape[0]
+                    timers.start("redistribute_gaussians")
+                    gaussians.redistribute_gaussians()
+                    timers.stop("redistribute_gaussians")
+                    num_3dgs_after_redistribute = gaussians.get_xyz.shape[0]
 
-            gaussians.optimizer.zero_grad(set_to_none=True) # free old tensors' grads before densification
-
-            timers.start("densify_and_prune")
-            size_threshold = 20 if iteration > args.opacity_reset_interval else None
-            gaussians.densify_and_prune(
-                args.densify_grad_threshold,
-                args.min_opacity,
-                scene.cameras_extent,
-                size_threshold,
-            )
-            timers.stop("densify_and_prune")
-
-            # redistribute after densify_and_prune, because we have new gaussians to distribute evenly.
-            if utils.get_denfify_iter() % args.redistribute_gaussians_frequency == 0:
-                num_3dgs_before_redistribute = gaussians.get_xyz.shape[0]
-                timers.start("redistribute_gaussians")
-                gaussians.redistribute_gaussians()
-                timers.stop("redistribute_gaussians")
-                num_3dgs_after_redistribute = gaussians.get_xyz.shape[0]
-
-                log_file.write(
-                    "iteration[{},{}) redistribute. Now num of 3dgs before redistribute: {}. Now num of 3dgs after redistribute: {}. \n".format(
-                        iteration,
-                        iteration + args.bsz,
-                        num_3dgs_before_redistribute,
-                        num_3dgs_after_redistribute,
+                    log_file.write(
+                        "iteration[{},{}) redistribute. Now num of 3dgs before redistribute: {}. Now num of 3dgs after redistribute: {}. \n".format(
+                            iteration,
+                            iteration + args.bsz,
+                            num_3dgs_before_redistribute,
+                            num_3dgs_after_redistribute,
+                        )
                     )
+
+                utils.check_memory_usage(
+                    log_file, args, iteration, gaussians, before_densification_stop=True
                 )
 
-            utils.check_memory_usage(
-                log_file, args, iteration, gaussians, before_densification_stop=True
-            )
+                utils.inc_densify_iter()
 
-            utils.inc_densify_iter()
-
-        if (
-            utils.check_update_at_this_iter(
-                iteration, args.bsz, args.opacity_reset_interval, 0
-            )
-            and iteration + args.bsz <= args.opacity_reset_until_iter
-        ):
-            timers.start("reset_opacity")
-            gaussians.reset_opacity()
-            timers.stop("reset_opacity")
+            if (
+                utils.check_update_at_this_iter(
+                    iteration, args.bsz, args.opacity_reset_interval, 0
+                )
+                and iteration + args.bsz <= args.opacity_reset_until_iter
+            ):
+                timers.start("reset_opacity")
+                gaussians.reset_opacity()
+                timers.stop("reset_opacity")
 
         timers.stop("densification")
     else:

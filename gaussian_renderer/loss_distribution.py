@@ -2591,7 +2591,7 @@ def final_system_loss_computation(
     elif args.offload and args.fused_loss == 'torch_compile':
         global COMPILED_LOSS_MODULE
         Ll1, ssim_loss = COMPILED_LOSS_MODULE(local_image_rect, local_image_rect_gt, local_image_rect_pixels_compute_locally)
-    elif args.offload and args.fused_loss == 'advanced_fuse':
+    elif args.fused_loss == 'advanced_fuse':
         Ll1 = l1_loss(local_image_rect, local_image_rect_gt)
         ssim_loss = fused_ssim(local_image_rect.unsqueeze(0), local_image_rect_gt.unsqueeze(0))
     else:

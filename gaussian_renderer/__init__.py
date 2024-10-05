@@ -1666,7 +1666,7 @@ def render_final(batched_screenspace_pkg, batched_strategies, tile_size=16):
 
 max_num_intersection = 0
 
-def gsplat_render_final(batched_screenspace_pkg, batched_strategies, tile_size=16):
+def gsplat_render_final(batched_screenspace_pkg, batched_strategies, tile_size=16, accumulate_grads=False):
     """
     Render the scene.
     """
@@ -1674,7 +1674,7 @@ def gsplat_render_final(batched_screenspace_pkg, batched_strategies, tile_size=1
     B = len(batched_strategies)
 
     # If there's only one gpu, use batched kernel.
-    if utils.DEFAULT_GROUP.size() == 1:
+    if utils.DEFAULT_GROUP.size() == 1 and not accumulate_grads:
         means2D = batched_screenspace_pkg["batched_means2D_redistributed"]
         radiis = batched_screenspace_pkg["batched_radiis_redistributed"]
         depths = batched_screenspace_pkg["batched_depths_redistributed"]

@@ -80,6 +80,7 @@ def loadCam(args, id, cam_info, decompressed_image=None, return_image=False):
         gt_alpha_mask=loaded_mask,
         image_name=cam_info.image_name,
         uid=id,
+        torch_dataloader=args.torch_dataloader,
     )
 
 

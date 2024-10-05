@@ -808,8 +808,9 @@ class DivisionStrategyHistoryFinal:
         self.world_size = world_size
         self.rank = rank
         self.accum_heuristic = {}
-        for camera in dataset.cameras:
-            self.accum_heuristic[camera.uid] = torch.ones(
+        #TODO: fix the temporary workaround
+        for idx, camera in enumerate(dataset.cameras):
+            self.accum_heuristic[idx] = torch.ones(
                 (utils.TILE_Y,), dtype=torch.float32, device="cuda", requires_grad=False
             )
 

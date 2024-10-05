@@ -77,7 +77,10 @@ class AuxiliaryParams(ParamGroup):
         self.backend = "default" # "default", "gsplat"
         self.offload = False
         self.prealloc_capacity = 5_000_000
-        self.fused_loss = "torch_compile" # "default", "hand_written", "torch_compile", "advanced_fuse"
+        self.fused_loss = "torch_compile" # "default", "hand_written", "torch_compile", "advanced_fuse"s
+        self.accumulate_grads = False
+        self.torch_dataloader = False
+        self.num_workers = 1
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):
@@ -170,7 +173,7 @@ class DistributionParams(ParamGroup):
         self.preload_dataset_to_gpu_threshold = (
             10  # unit is GB, by default 10GB memory limit for dataset.
         )
-        self.multiprocesses_image_loading = True
+        self.multiprocesses_image_loading = False # Disable multiprocess image loading by default to avoid out of shared memory
         self.num_train_cameras = -1
         self.num_test_cameras = -1
 

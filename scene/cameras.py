@@ -32,6 +32,7 @@ class Camera(nn.Module):
         uid,
         trans=np.array([0.0, 0.0, 0.0]),
         scale=1.0,
+        torch_dataloader=False,
     ):
         super(Camera, self).__init__()
 
@@ -42,6 +43,7 @@ class Camera(nn.Module):
         self.FoVx = FoVx
         self.FoVy = FoVy
         self.image_name = image_name
+        self.device = "cpu" if torch_dataloader else "cuda"
 
         args = get_args()
         log_file = get_log_file()
@@ -82,7 +84,7 @@ class Camera(nn.Module):
         self.scale = scale
 
         self.world_view_transform = (
-            torch.tensor(getWorld2View2(R, T, trans, scale)).transpose(0, 1).cuda()
+            torch.tensor(getWorld2View2(R, T, trans, scale)).transpose(0, 1).to(self.device)
         )
         self.world_view_transform_backup = self.world_view_transform.clone().detach()
         self.projection_matrix = (
@@ -90,7 +92,7 @@ class Camera(nn.Module):
                 znear=self.znear, zfar=self.zfar, fovX=self.FoVx, fovY=self.FoVy
             )
             .transpose(0, 1)
-            .cuda()
+            .to(self.device)
         )
         self.full_proj_transform = (
             self.world_view_transform.unsqueeze(0).bmm(
@@ -117,14 +119,14 @@ class Camera(nn.Module):
             self.world_view_transform = (
                 torch.tensor(getWorld2View2(self.R, self.T, self.trans, self.scale))
                 .transpose(0, 1)
-                .cuda()
+                .to(self.device)
             )
             self.projection_matrix = (
                 getProjectionMatrix(
                     znear=self.znear, zfar=self.zfar, fovX=self.FoVx, fovY=self.FoVy
                 )
                 .transpose(0, 1)
-                .cuda()
+                .to(self.device)
             )
             self.full_proj_transform = (
                 self.world_view_transform.unsqueeze(0).bmm(
