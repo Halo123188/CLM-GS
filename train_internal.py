@@ -44,7 +44,7 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
     prepare_output_and_logger(dataset_args)
     utils.log_cpu_memory_usage("at the beginning of training")
     start_from_this_iteration = 1
-    if args.sharing_strategy is not "default":
+    if args.sharing_strategy != "default":
         torch.multiprocessing.set_sharing_strategy(args.sharing_strategy)
 
     # Init parameterized scene
