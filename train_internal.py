@@ -34,6 +34,7 @@ from diff_gaussian_rasterization import (
     send2cpu_cat_buffer_osr_shs,
 )
 import torch.multiprocessing
+import gc
 
 def training(dataset_args, opt_args, pipe_args, args, log_file):
 
@@ -46,6 +47,8 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
     start_from_this_iteration = 1
     if args.sharing_strategy != "default":
         torch.multiprocessing.set_sharing_strategy(args.sharing_strategy)
+    
+    gc.set_debug(gc.DEBUG_LEAK)
 
     # Init parameterized scene
     gaussians = GaussianModel(sh_degree=dataset_args.sh_degree, offload=args.offload, mxw_debug=args.mxw_debug)
@@ -77,7 +80,7 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
             dataloader = DataLoader(
                 train_dataset,
                 batch_size=args.bsz,
-                # shuffle=True,
+                shuffle=True,
                 drop_last=True,
                 pin_memory=True,
                 collate_fn=custom_collate_fn
@@ -87,7 +90,7 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
                 train_dataset,
                 batch_size=args.bsz,
                 num_workers=args.num_workers,
-                # shuffle=True,
+                shuffle=True,
                 drop_last=True,
                 persistent_workers=True,
                 pin_memory=True,
@@ -975,6 +978,12 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
             
         utils.memory_report("at the end of the iteration")
         log_file.flush()
+        
+        gc.collect()
+        # Dump the garbage collection statistics to a JSON file
+        # gc_stats = gc.get_stats()
+        # with open('gc_stats.json', 'a') as file:
+        #     json.dump(gc_stats, file, indent=4)
 
     # Finish training
     if opt_args.iterations not in args.save_iterations:
@@ -1154,27 +1163,15 @@ def training_report(
                 strategy_history = DivisionStrategyHistoryFinal(
                     eval_dataset, utils.DEFAULT_GROUP.size(), utils.DEFAULT_GROUP.rank()
                 )
-                # Init dataloader
-                if args.num_workers == 0:
-                    dataloader = DataLoader(
-                        eval_dataset,
-                        batch_size=args.bsz,
-                        # shuffle=True,
-                        drop_last=True,
-                        pin_memory=True,
-                        collate_fn=custom_collate_fn
-                    )
-                elif args.num_workers > 0:
-                    dataloader = DataLoader(
-                        eval_dataset,
-                        batch_size=args.bsz,
-                        num_workers=args.num_workers,
-                        # shuffle=True,
-                        drop_last=True,
-                        persistent_workers=True,
-                        pin_memory=True,
-                        collate_fn=custom_collate_fn
-                    )
+                # Init dataloader: num_workers = 0
+                dataloader = DataLoader(
+                    eval_dataset,
+                    batch_size=args.bsz,
+                    # shuffle=True,
+                    drop_last=True,
+                    pin_memory=True,
+                    collate_fn=custom_collate_fn
+                )
                 dataloader_iter = iter(dataloader)
                 
                 for idx in range(1, num_cameras + 1, args.bsz):

@@ -321,16 +321,26 @@ def memory_report(prefix):
     iteration = get_cur_iter()
     args = get_args()
     log_file = get_log_file()
+    p = psutil.Process()
     
     if (iteration % args.log_interval) == 1:
         log_file.write(
             "[Memory Report] {}\n".format(prefix)
-            + " -> [CPU] Memory Usage: {} GB. Available Memory: {} GB. Total memory: {} GB.\n".format(
+            + " -> [CPU] Memory Usage: {:.3f} GB. Available Memory: {:.3f} GB. Total memory: {:.3f} GB.\n".format(
                 psutil.virtual_memory().used / 1024 / 1024 / 1024,
                 psutil.virtual_memory().available / 1024 / 1024 / 1024,
                 psutil.virtual_memory().total / 1024 / 1024 / 1024,
             )
-            + " -> [GPU] Memory usage: {} GB. Max Memory usage: {} GB. Now reserved memory: {} GB. Max reserved memory: {} GB\n".format(
+            + " -> [CPU more] rss: {:.3f} GB, vms: {:.3f} GB, shared: {:.3f} GB, text: {:.3f} GB, lib: {:.3f} GB, data: {:.3f} GB, dirty: {:.3f} GB.\n".format(
+                p.memory_info().rss / 1024 / 1024 / 1024,
+                p.memory_info().vms / 1024 / 1024 / 1024,
+                p.memory_info().shared / 1024 / 1024 / 1024,
+                p.memory_info().text / 1024 / 1024 / 1024,
+                p.memory_info().lib / 1024 / 1024 / 1024,
+                p.memory_info().data / 1024 / 1024 / 1024,
+                p.memory_info().dirty / 1024 / 1024 / 1024,
+            )
+            + " -> [GPU] Memory usage: {:.3f} GB. Max Memory usage: {:.3f} GB. Now reserved memory: {:.3f} GB. Max reserved memory: {:.3f} GB\n".format(
                 torch.cuda.memory_allocated() / 1024 / 1024 / 1024,
                 torch.cuda.max_memory_allocated() / 1024 / 1024 / 1024,
                 torch.cuda.memory_reserved() / 1024 / 1024 / 1024,
@@ -539,15 +549,26 @@ def prepare_output_and_logger(args):
 
 def log_cpu_memory_usage(position_str):
     args = get_args()
+    p = psutil.Process()
+    
     if not args.check_cpu_memory:
         return
     LOG_FILE.write(
         "[Check CPU Memory]"
         + position_str
-        + " ->  Memory Usage: {} GB. Available Memory: {} GB. Total memory: {} GB\n".format(
+        + " ->  Memory Usage: {:.3f} GB. Available Memory: {:.3f} GB. Total memory: {:.3f} GB.\n".format(
             psutil.virtual_memory().used / 1024 / 1024 / 1024,
             psutil.virtual_memory().available / 1024 / 1024 / 1024,
             psutil.virtual_memory().total / 1024 / 1024 / 1024,
+        )
+        + " -> rss: {:.3f} GB, vms: {:.3f} GB, shared: {:.3f} GB, text: {:.3f} GB, lib: {:.3f} GB, data: {:.3f} GB, dirty: {:.3f} GB.\n".format(
+            p.memory_info().rss / 1024 / 1024 / 1024,
+            p.memory_info().vms / 1024 / 1024 / 1024,
+            p.memory_info().shared / 1024 / 1024 / 1024,
+            p.memory_info().text / 1024 / 1024 / 1024,
+            p.memory_info().lib / 1024 / 1024 / 1024,
+            p.memory_info().data / 1024 / 1024 / 1024,
+            p.memory_info().dirty / 1024 / 1024 / 1024,
         )
     )
 

@@ -145,7 +145,7 @@ class Scene:
             self.decode_dataset_path = os.path.join(args.decode_dataset_path, "dataset_raw")
             statvfs = os.statvfs(self.decode_dataset_path)
             available_space_in_GB = 1.0 * statvfs.f_frsize * statvfs.f_bavail / 1e9
-            assert available_space_in_GB >= dataset_size_in_GB, "Not enough space in disk for decompressed dataset."
+            assert available_space_in_GB >= dataset_size_in_GB, f"Not enough space in disk for decompressed dataset. avail: {available_space_in_GB}. need: {dataset_size_in_GB}"
             
             log_file.write(f"[NOTE]: Pre-decoding dataset({dataset_size_in_GB}GB) to disk dir: {self.decode_dataset_path}\n")
             utils.print_rank_0("Decoding Training Cameras To Disk")
