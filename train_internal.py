@@ -1016,29 +1016,33 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
             # utils.memory_report("after freeing activation states and before saving gaussians")
 
             # Save Gaussians
-            if not args.do_not_save and any(
+            if any(
                 [
                     iteration <= save_iteration < iteration + args.bsz
                     for save_iteration in args.save_iterations
                 ]
             ):
+                utils.print_rank_0("\n[ITER {}] Saving End2end".format(iteration))
                 end2end_timers.stop()
                 end2end_timers.print_time(log_file, iteration + args.bsz)
-                utils.print_rank_0("\n[ITER {}] Saving Gaussians".format(iteration))
-                log_file.write("[ITER {}] Saving Gaussians\n".format(iteration))
-                scene.save(iteration)
 
-                if args.save_strategy_history:
-                    with open(
-                        args.log_folder
-                        + "/strategy_history_ws="
-                        + str(utils.WORLD_SIZE)
-                        + "_rk="
-                        + str(utils.GLOBAL_RANK)
-                        + ".json",
-                        "w",
-                    ) as f:
-                        json.dump(strategy_history.to_json(), f)
+                if not args.do_not_save:
+                    utils.print_rank_0("\n[ITER {}] Saving Gaussians".format(iteration))
+                    log_file.write("[ITER {}] Saving Gaussians\n".format(iteration))
+                    scene.save(iteration)
+
+                    if args.save_strategy_history:
+                        with open(
+                            args.log_folder
+                            + "/strategy_history_ws="
+                            + str(utils.WORLD_SIZE)
+                            + "_rk="
+                            + str(utils.GLOBAL_RANK)
+                            + ".json",
+                            "w",
+                        ) as f:
+                            json.dump(strategy_history.to_json(), f)
+
                 end2end_timers.start()
                 # utils.memory_report("after densification")
 
@@ -1353,9 +1357,9 @@ def training_report(
                         #FIXME: quick workaround for verifying the correctness
                         camera.world_view_transform = camera.world_view_transform.cuda()
                         camera.full_proj_transform = camera.full_proj_transform.cuda()
-                        
-                        if backend == "gsplat":
-                            if args.offload and args.gpu_cache == "xyzosr":
+
+                        if args.offload:
+                            if args.gpu_cache == "xyzosr":
                                 batched_screenspace_pkg = (
                                     gsplat_distributed_preprocess3dgs_and_all2all_offloaded_cacheXYZOSR(
                                         [camera],
@@ -1371,8 +1375,8 @@ def training_report(
                                     batched_screenspace_pkg, [strategy]
                                 )
                                 batched_image.append(images[0])
-                            
-                            elif args.offload and args.gpu_cache == "no_cache":
+                                del batched_screenspace_pkg
+                            elif args.gpu_cache == "no_cache":
                                 batched_screenspace_pkg = (
                                     gsplat_distributed_preprocess3dgs_and_all2all_final(
                                         [camera],
@@ -1388,25 +1392,45 @@ def training_report(
                                     batched_screenspace_pkg, [strategy]
                                 )
                                 batched_image.append(images[0])
-                            
+                                del batched_screenspace_pkg
                             else:
-                                raise ValueError("Invalid gpu cache strategy.")
-                            
+                                raise ValueError("Invalid gpu cache strategy.")  
                         else:
-                            batched_screenspace_pkg = (
-                                distributed_preprocess3dgs_and_all2all_final(
-                                    [camera],
-                                    scene.gaussians,
-                                    pipe_args,
-                                    background,
-                                    batched_strategies=[strategy],
-                                    mode="test",
+                            if args.backend == "gsplat":
+                                batched_screenspace_pkg = (
+                                    gsplat_distributed_preprocess3dgs_and_all2all_final(
+                                        [camera],
+                                        scene.gaussians,
+                                        pipe_args,
+                                        background,
+                                        batched_strategies=[strategy],
+                                        mode="test",
+                                        offload=False,
+                                    )
                                 )
-                            )
-                            images, _ = render_final(
-                                batched_screenspace_pkg, [strategy]
-                            )
-                            batched_image.append(images[0])
+                                images, _ = gsplat_render_final(
+                                    batched_screenspace_pkg, [strategy]
+                                )
+                                
+                                batched_image.append(images[0])
+                                del batched_screenspace_pkg
+                            else:
+                                batched_screenspace_pkg = (
+                                    distributed_preprocess3dgs_and_all2all_final(
+                                        [camera],
+                                        scene.gaussians,
+                                        pipe_args,
+                                        background,
+                                        batched_strategies=[strategy],
+                                        mode="test",
+                                    )
+                                )
+                                images, _ = render_final(
+                                    batched_screenspace_pkg, [strategy]
+                                )
+                                batched_image.append(images[0])
+                                del batched_screenspace_pkg
+
                     for camera_id, (image, gt_camera) in enumerate(
                         zip(batched_image, batched_cameras)
                     ):
