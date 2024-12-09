@@ -223,6 +223,7 @@ class DebugParams(ParamGroup):
 
         self.manual_gc = False
         self.offload_shs_grad_before_every_microbatch = False
+        self.comm_stream_priority = 0
 
         super().__init__(parser, "Debug Parameters")
 

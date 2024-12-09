@@ -508,7 +508,7 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
     #         raise ValueError("Invalid gpu cache strategy.")
 
     # declare stream for communication
-    comm_stream = torch.cuda.Stream(device=0)
+    comm_stream = torch.cuda.Stream(device=0, priority=args.comm_stream_priority)
 
     # Training Loop
     end2end_timers = End2endTimer(args)
