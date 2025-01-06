@@ -54,6 +54,7 @@ from gsplat import (
     isect_offset_encode,
     rasterize_to_pixels,
 )
+from functools import reduce
 
 def calculate_filters(
     batched_cameras,
@@ -243,6 +244,7 @@ def pipeline_offload_impl(
     perm_generator,
 ):
     args = utils.get_args()
+    iteration = utils.get_cur_iter()
 
     # prepare all parameters
     xyz_gpu = gaussians.get_xyz
@@ -252,6 +254,7 @@ def pipeline_offload_impl(
     bsz = len(batched_cameras)
     n_gaussians = xyz_gpu.shape[0]
 
+    torch.cuda.nvtx.range_push("calculate_filters")
     # calculate gaussian visible filters for all cameras
     filters, camera_ids, gaussian_ids = calculate_filters(
         batched_cameras,
@@ -260,11 +263,13 @@ def pipeline_offload_impl(
         scaling_gpu_origin,
         rotation_gpu_origin
     ) # list of GPU long tensors. len(cameras)
+    torch.cuda.nvtx.range_pop()
 
     # Sort cameras using these filters when overlap_cpuadam is enabled.
     overlap_cpuadam_version = args.overlap_cpuadam_version
     order_calculation_version = args.order_calculation_version
     if args.overlap_cpuadam:
+        torch.cuda.nvtx.range_push("sort cameras")
         if order_calculation_version == 0:
             bool_filters = []
             for filter in filters:
@@ -370,12 +375,42 @@ def pipeline_offload_impl(
             last_calc_percamera_counts_cpu = last_calc_percamera_counts.cpu().tolist()
             last_calc_percamera_counts_cpu = [not_touched_gaussian_ids.shape[0]] + last_calc_percamera_counts_cpu
             last_calc_gaussianids = torch.cat([not_touched_gaussian_ids, last_calc_gaussianids], dim=0).to(torch.int32)
-            last_calc_gaussianids_cpu = last_calc_gaussianids.cpu()
+            last_calc_gaussianids_cpu = last_calc_gaussianids.cpu() # TODO: this is slow
             last_calc_gaussian_ids_per_camera = torch.split(last_calc_gaussianids_cpu, last_calc_percamera_counts_cpu)
             assert sum(last_calc_percamera_counts_cpu) == n_gaussians, "sum(last_calc_percamera_counts_cpu) is supposed to be equal to gaussian_ids.shape[0]"
             
             finish_indices_filters = last_calc_gaussian_ids_per_camera
             assert len(finish_indices_filters) == bsz + 1, "len(finish_indices_filters) should be equal to bsz + 1"
+        elif order_calculation_version == 2:
+            gs_bitmap = torch.zeros(bsz, n_gaussians, dtype=torch.uint8, device="cuda")
+            gs_bitmap[camera_ids, gaussian_ids] = 1
+            
+            not_touched_ids = torch.nonzero(reduce(torch.bitwise_or, torch.unbind(gs_bitmap)) == 0).flatten()
+            cur_cam = min(enumerate(filters), key=lambda x: len(x[1]))[0] #  make the sparsest sample the last one
+            ordered_cams = [cur_cam]
+            update_ls = [torch.nonzero(gs_bitmap[cur_cam, :]).flatten()]
+            for i in range(1, bsz):
+                cur_cam = ordered_cams[-1]
+                gs_bitmap[:, filters[cur_cam]] = 0
+                s_vec = torch.sum(gs_bitmap, dim=1, dtype=torch.int64)
+                s_vec[ordered_cams] = torch.iinfo(torch.int64).max
+                next_cam = torch.argmin(s_vec).item()
+                ordered_cams.append(next_cam)
+                next_update = torch.nonzero(gs_bitmap[next_cam, :]).flatten()
+                update_ls.append(next_update)
+            update_ls.append(not_touched_ids)
+            update_ls.reverse()
+            ordered_cams.reverse()
+
+            cat_update_ls = torch.cat(update_ls, dim=0)
+            update_ls_dim = [len(update) for update in update_ls]
+            cat_update_ls = cat_update_ls.cpu()
+            update_ls_cpu = torch.split(cat_update_ls, update_ls_dim, dim=0)
+
+            finish_indices_filters = update_ls_cpu
+            assert len(finish_indices_filters) == bsz + 1, "len(finish_indices_filters) should be equal to bsz + 1"
+            assert sum([len(indicies) for indicies in finish_indices_filters]) == n_gaussians
+
         else:
             raise ValueError("Invalid order calculation version.")
 
@@ -390,13 +425,17 @@ def pipeline_offload_impl(
                            parameters_grad):
 
             if overlap_cpuadam_version == 0:
+                torch.cuda.nvtx.range_push(f"cpuadam thread for iter: [{iteration},{iteration+bsz})")
                 parameters.grad = parameters_grad
 
                 cpu_adam.sparse_adam_inc_step() # this is related to lr. 
                 if not args.stop_update_param:
+                    torch.cuda.nvtx.range_push("cpu_adam.sparse_step()")
                     cpu_adam.sparse_step(sparse_indices=finish_indices_filters[0], version=2, scale=1.0/bsz)
+                    torch.cuda.nvtx.range_pop()
 
                 for i in range(0, bsz):
+                    torch.cuda.nvtx.range_push(f"cpuadam microbatch: {i} - [{iteration},{iteration+bsz})")
                     
                     thread_sync_signal_events[i].wait() # wait for the signal of finishing the i-th microbatch.
 
@@ -406,8 +445,11 @@ def pipeline_offload_impl(
                     finish_indices_filter = finish_indices_filters[i+1] # torch int32 array on cpu
                     if not args.stop_update_param and finish_indices_filter.shape[0] > 0: # the finish filter should not be empty
                         cpu_adam.sparse_step(sparse_indices=finish_indices_filter, version=2, scale=1.0/bsz)
+                    
+                    torch.cuda.nvtx.range_pop()
 
                 parameters_grad.zero_() # clear the grad buffer so that it can be reused in the next iteration. 
+                torch.cuda.nvtx.range_pop()
             elif overlap_cpuadam_version == 1:
                 parameters.grad = parameters_grad / bsz
                 cpu_adam.step()
@@ -438,6 +480,8 @@ def pipeline_offload_impl(
                                                                     ))
         if overlap_cpuadam_version == 0:
             cpuadam_worker.start()
+        
+        torch.cuda.nvtx.range_pop()
 
     # accumulate gradients at opacity_gpu, scaling_gpu, rotation_gpu since they are computed afer the activation functions.
     # no need for xyz since it does not have activation function.
@@ -632,6 +676,9 @@ def pipeline_offload_impl(
     else:
         torch.cuda.synchronize() # we need to make sure gradients have all been sent back to cpu. 
         gaussians._parameters.grad = gaussians.parameters_grad_buffer[:N, :]
+
+        timers = utils.get_timers()
+        timers.start("grad scale + optimizer step + zero grad")
         for param in gaussians.all_parameters():
             if param.grad is not None:
                 param.grad /= args.bsz
@@ -639,6 +686,7 @@ def pipeline_offload_impl(
             gaussians.optimizer.step()
         gaussians.optimizer.zero_grad(set_to_none=True)
         gaussians.parameters_grad_buffer[:N, :].zero_()
+        timers.stop("grad scale + optimizer step + zero grad")
 
     torch.cuda.synchronize()
     return losses
