@@ -392,8 +392,8 @@ def pipeline_offload_impl(
             for i in range(1, bsz):
                 cur_cam = ordered_cams[-1]
                 gs_bitmap[:, filters[cur_cam]] = 0
-                s_vec = torch.sum(gs_bitmap, dim=1, dtype=torch.int64)
-                s_vec[ordered_cams] = torch.iinfo(torch.int64).max
+                s_vec = torch.sum(gs_bitmap, dim=1, dtype=torch.int32)
+                s_vec[ordered_cams] = torch.iinfo(torch.int32).max
                 next_cam = torch.argmin(s_vec).item()
                 ordered_cams.append(next_cam)
                 next_update = torch.nonzero(gs_bitmap[next_cam, :]).flatten()
@@ -402,7 +402,8 @@ def pipeline_offload_impl(
             update_ls.reverse()
             ordered_cams.reverse()
 
-            cat_update_ls = torch.cat(update_ls, dim=0)
+            cat_update_ls = torch.cat(update_ls, dim=0).to(torch.int32)
+            # cat_update_ls = torch.cat(update_ls, dim=0)
             update_ls_dim = [len(update) for update in update_ls]
             cat_update_ls = cat_update_ls.cpu()
             update_ls_cpu = torch.split(cat_update_ls, update_ls_dim, dim=0)
