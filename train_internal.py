@@ -840,6 +840,7 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
 
     # Init auxiliary tools
 
+    torch.cuda.set_device(args.gpu)
     timers = Timer(args)
     utils.set_timers(timers)
     prepare_output_and_logger(dataset_args)
@@ -932,7 +933,7 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
     #         raise ValueError("Invalid gpu cache strategy.")
 
     # declare stream for communication
-    comm_stream = torch.cuda.Stream(device=0, priority=args.comm_stream_priority)
+    comm_stream = torch.cuda.Stream(device=args.gpu, priority=args.comm_stream_priority)
 
     # Training Loop
     end2end_timers = End2endTimer(args)
@@ -1623,7 +1624,6 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
     if args.nsys_profile:
         torch.cuda.cudart().cudaProfilerStop()
     
-    # HACK
     parameters = gaussians._parameters[::5000].cpu().detach().numpy().tolist()
     json.dump(parameters, open(os.path.join(args.model_path, "shs_parameters.json"), "w"))
 

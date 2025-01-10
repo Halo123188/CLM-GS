@@ -89,6 +89,7 @@ class AuxiliaryParams(ParamGroup):
         self.num_workers = 0
         self.sharing_strategy = "default" # "default" ("file_descriptor"), or "file_system" [see https://pytorch.org/docs/stable/multiprocessing.html#sharing-strategies]
         self.gpu_cache = "no_cache"
+        self.gpu = 0
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args): 
