@@ -230,6 +230,7 @@ class DebugParams(ParamGroup):
         self.overlap_cpuadam = False
         self.overlap_cpuadam_version = 0
         self.order_calculation_version = 1
+        self.retention = False
 
         super().__init__(parser, "Debug Parameters")
 
