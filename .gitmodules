@@ -8,6 +8,7 @@
 [submodule "submodules/gsplat"]
 	path = submodules/gsplat
 	url = git@github.com:alexis-mmm/gsplat.git
+	branch = xiwen
 [submodule "submodules/cpu-adam"]
 	path = submodules/cpu-adam
 	url = git@github.com:TarzanZhao/cpu-adam.git
