@@ -321,8 +321,7 @@ class SceneDataset:
                 self.cur_epoch_cameras = self.sample_camera_idx.copy()
             else:
                 self.cur_epoch_cameras = list(range(self.camera_size))
-            #HACK: temporarily disable shuffling for reproductibility
-            # random.shuffle(self.cur_epoch_cameras)
+            random.shuffle(self.cur_epoch_cameras)
 
         self.cur_iteration += 1
 

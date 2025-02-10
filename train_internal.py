@@ -2725,7 +2725,7 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
             dataloader = DataLoader(
                 train_dataset,
                 batch_size=args.bsz,
-                # shuffle=True,
+                shuffle=True,
                 drop_last=True,
                 pin_memory=True,
                 collate_fn=custom_collate_fn
@@ -2735,7 +2735,7 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
                 train_dataset,
                 batch_size=args.bsz,
                 num_workers=args.num_workers,
-                # shuffle=True,
+                shuffle=True,
                 drop_last=True,
                 persistent_workers=True,
                 pin_memory=True,
