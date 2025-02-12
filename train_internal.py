@@ -58,6 +58,7 @@ from gsplat import (
     isect_tiles,
     isect_offset_encode,
     rasterize_to_pixels,
+    spherical_harmonics_bwd_inplace,
 )
 from functools import reduce
 
@@ -233,6 +234,100 @@ def pipeline_forward_one_step(
     rendered_image = rendered_image.squeeze(0).permute(2, 0, 1).contiguous()
 
     return rendered_image, batched_means2D, batched_radiis
+
+def pipeline_forward_one_step_shs_inplace(
+    filtered_opacity_gpu,
+    filtered_scaling_gpu,
+    filtered_rotation_gpu,
+    filtered_xyz_gpu,
+    filtered_shs,
+    camera,
+    scene,
+    gaussians,
+    background,
+    pipe_args
+):
+
+    viewmat = camera.world_view_transform.transpose(0, 1)  # why transpose
+    # K = camera.create_k_on_gpu() # create K now, which may invoke cpu-gpu transfer
+    K = camera.K
+    n_selected = filtered_xyz_gpu.shape[0]
+    image_width = int(camera.image_width)
+    image_height = int(camera.image_height)
+    tile_size = 16
+    B = 1 # micro batch size is just 1
+
+    batched_radiis, batched_means2D, batched_depths, batched_conics, _ = (
+        fully_fused_projection(
+            means=filtered_xyz_gpu, # (N, 3)
+            covars=None,
+            quats=filtered_rotation_gpu,
+            scales=filtered_scaling_gpu,
+            viewmats=viewmat.unsqueeze(0),
+            Ks=K.unsqueeze(0),
+            width=int(camera.image_width),
+            height=int(camera.image_height),
+            packed=False,
+        )
+    ) # (1, N), (1, N, 2), (1, N), (1, N, 3), (1, N)
+
+    batched_means2D.retain_grad() # this is only for training. 
+
+    sh_degree = gaussians.active_sh_degree
+    camtoworlds = camera.camtoworlds
+    # camtoworlds = torch.inverse(viewmat.unsqueeze(0)) # (4, 4)
+    dirs = filtered_xyz_gpu[None, :, :] - camtoworlds[:, None, :3, 3]
+    filtered_shs = filtered_shs.reshape(1, n_selected, 16, 3)
+    
+    with torch.no_grad():
+        batched_colors_origin = spherical_harmonics(
+            degrees_to_use=sh_degree, dirs=dirs, coeffs=filtered_shs
+        )
+    batched_colors_detached = batched_colors_origin.detach().requires_grad_()
+    batched_colors = torch.clamp_min(batched_colors_detached + 0.5, 0.0) # (1, N, 3)
+    batched_opacities = filtered_opacity_gpu.squeeze(1).unsqueeze(0) # (N, 1) -> (1, N)
+
+    # NOTE: In the above code, we keep the first batch dimension, even if it is always 1. 
+
+    # render
+    # Identify intersecting tiles.
+    tile_width = math.ceil(image_width / float(tile_size))
+    tile_height = math.ceil(image_height / float(tile_size))
+
+    # flatten_ids: (C*N)
+    _, isect_ids, flatten_ids = isect_tiles(
+        means2d=batched_means2D,
+        radii=batched_radiis,
+        depths=batched_depths,
+        tile_size=tile_size,
+        tile_width=tile_width,
+        tile_height=tile_height,
+        packed=False,
+    )
+    isect_offsets = isect_offset_encode(
+        isect_ids, B, tile_width, tile_height
+    )  # (B, tile_height, tile_width)
+
+    # Rasterize to pixels. batched_rendered_image: (B, image_height, image_width, 3)
+    backgrounds = (
+        background.repeat(B, 1) if background is not None else None
+    )
+    rendered_image, _ = rasterize_to_pixels(
+        means2d=batched_means2D,
+        conics=batched_conics,
+        colors=batched_colors,
+        opacities=batched_opacities,
+        image_width=image_width,
+        image_height=image_height,
+        tile_size=tile_size,
+        isect_offsets=isect_offsets,
+        flatten_ids=flatten_ids,
+        backgrounds=backgrounds,
+    )
+
+    rendered_image = rendered_image.squeeze(0).permute(2, 0, 1).contiguous()
+
+    return rendered_image, batched_means2D, batched_radiis, batched_colors_detached, dirs
 
 import threading
 import queue
@@ -2536,6 +2631,451 @@ def pipeline_offload_retention_optimized_v3_impl(
     torch.cuda.synchronize()
     return losses
 
+def pipeline_offload_retention_optimized_v4_impl(
+    gaussians,
+    scene,
+    batched_cameras,
+    parameters_grad_buffer,
+    background,
+    pipe_args,
+    comm_stream,
+    perm_generator,
+):
+    args = utils.get_args()
+    iteration = utils.get_cur_iter()
+    log_file = utils.get_log_file()
+
+    assert not args.offload_shs_grad_before_every_microbatch, "retention 4 currently requires disable offload_shs_grad_before_every_microbatc"
+
+    # prepare all parameters
+    xyz_gpu = gaussians.get_xyz
+    opacity_gpu_origin = gaussians.get_opacity
+    scaling_gpu_origin = gaussians.get_scaling
+    rotation_gpu_origin = gaussians.get_rotation
+    bsz = len(batched_cameras)
+    n_gaussians = xyz_gpu.shape[0]
+
+    torch.cuda.nvtx.range_push("calculate_filters")
+    # calculate gaussian visible filters for all cameras
+    filters, camera_ids, gaussian_ids = calculate_filters(
+        batched_cameras,
+        xyz_gpu,
+        opacity_gpu_origin,
+        scaling_gpu_origin,
+        rotation_gpu_origin
+    ) # list of GPU long tensors. len(cameras)
+    torch.cuda.nvtx.range_pop()
+
+    # Sort cameras using these filters when overlap_cpuadam is enabled.
+    overlap_cpuadam_version = args.overlap_cpuadam_version
+    order_calculation_version = args.order_calculation_version
+    if args.overlap_cpuadam or args.retention != 0:
+        torch.cuda.nvtx.range_push("sort cameras")
+        
+        # This version only calculates the order and cpuadam update_ls based on v3
+        #TODO: downsample this
+        if order_calculation_version == 4:
+            gs_bitmap = torch.zeros(bsz, n_gaussians, dtype=torch.uint8, device="cuda")
+            gs_bitmap[camera_ids, gaussian_ids] = 1
+            zero_bitvec = torch.ones((n_gaussians,), dtype=torch.uint8, device="cuda")
+            sum_vec = torch.empty((bsz, ), dtype=torch.int32, device="cuda")
+            for i in range(bsz):
+                sum_vec[i] = len(filters[i])
+            
+            torch.cuda.nvtx.range_push("init lists")
+            not_touched_ids = torch.nonzero(torch.all(gs_bitmap == 0, dim=0)).flatten()
+            cur_cam = min(enumerate(filters), key=lambda x: len(x[1]))[0] #  make the sparsest sample the last one
+            ordered_cams = torch.empty((bsz,), dtype=torch.int32, device="cuda")
+            ordered_cams[-1] = cur_cam
+            update_ls = [torch.nonzero(gs_bitmap[cur_cam, :]).flatten()]
+            cnt_h = torch.empty((bsz-1,), dtype=torch.int64, device="cuda")
+            cnt_d = torch.empty((bsz-1,), dtype=torch.int64, device="cuda")
+            cnt_g = torch.empty((bsz-1,), dtype=torch.int64, device="cuda")
+            torch.cuda.nvtx.range_pop()
+
+            torch.cuda.nvtx.range_push("order calculation loop + reverse")
+            for i in range(1, bsz):
+                cur_cam = ordered_cams[-i]
+                # col_to_reset = torch.nonzero(gs_bitmap[cur_cam] & zero_bitvec).flatten()
+                col_to_reset = next_update if i > 1 else torch.nonzero(gs_bitmap[cur_cam] & zero_bitvec).flatten()
+                zero_bitvec.scatter_(dim=0, index=col_to_reset, src=torch.zeros_like(col_to_reset, dtype=torch.uint8))
+                col_to_reset = col_to_reset.expand(bsz, -1)
+                reset_col_gathered = torch.gather(gs_bitmap, dim=1, index=col_to_reset)
+                reset_sum = torch.sum(reset_col_gathered, dim=1)
+                sum_vec = sum_vec - reset_sum
+                sum_vec[ordered_cams[bsz-i:].squeeze()] = torch.iinfo(torch.int32).max
+                next_cam = torch.argmin(sum_vec)
+                ordered_cams[-i-1] = next_cam
+                next_update = torch.nonzero(gs_bitmap[next_cam] & zero_bitvec).flatten()
+                update_ls.append(next_update)
+
+            update_ls.append(not_touched_ids)
+            update_ls.reverse()
+            torch.cuda.nvtx.range_pop()
+
+            batched_cameras = [batched_cameras[i] for i in ordered_cams]
+            filters = [filters[i] for i in ordered_cams]
+
+            torch.cuda.nvtx.range_push("precompute sums")
+            for i in range(bsz-1):
+                this_bit = gs_bitmap[ordered_cams[i]]
+                next_bit = gs_bitmap[ordered_cams[i+1]]
+                cnt_h[i] = torch.sum(~this_bit & next_bit)
+                cnt_d[i] = torch.sum(this_bit & next_bit)
+                cnt_g[i] = torch.sum(this_bit & ~next_bit)
+            torch.cuda.nvtx.range_pop()
+
+            torch.cuda.nvtx.range_push("transfer cpuadam update list and sums to cpu")
+            data2cpu_ls = update_ls + [cnt_h, cnt_d, cnt_g]
+            cat_data2cpu = torch.cat(data2cpu_ls, dim=0).to(torch.int32)
+            cat_data2cpu_h = torch.empty_like(cat_data2cpu, device="cpu", pin_memory=True)
+            data2cpu_dim = [len(d) for d in data2cpu_ls]
+            cat_data2cpu_h.copy_(cat_data2cpu)
+            data2cpu_ls_h = torch.split(cat_data2cpu_h, data2cpu_dim, dim=0)
+            assert len(data2cpu_ls_h) == bsz + 4
+            update_ls_cpu = data2cpu_ls_h[:bsz+1]
+            cnt_h = data2cpu_ls_h[-3]
+            cnt_d = data2cpu_ls_h[-2]
+            cnt_g = data2cpu_ls_h[-1]
+
+            torch.cuda.nvtx.range_pop()
+
+            finish_indices_filters = update_ls_cpu
+            del gs_bitmap
+
+            assert len(finish_indices_filters) == bsz + 1, "len(finish_indices_filters) should be equal to bsz + 1"
+            assert sum([len(indicies) for indicies in finish_indices_filters]) == n_gaussians
+        
+        else:
+            raise ValueError("Invalid order calculation version.")
+
+        torch.cuda.nvtx.range_pop()
+        
+    if args.overlap_cpuadam:
+        def cpuadam_thread_v3(bsz,
+                              n_gaussians,
+                              signal_tensor_pinned,
+                              finish_indices_filters,
+                              cpu_adam,
+                              parameters,
+                              parameters_grad):
+            torch.cuda.nvtx.range_push(f"cpuadam thread for iter: [{iteration},{iteration+bsz})")
+
+            version = 3 if args.inplace_zero_grad else 2
+            parameters.grad = parameters_grad
+            if not args.stop_update_param:
+                torch.cuda.nvtx.range_push("cpu_adam.sparse_step()")
+                cpu_adam.batched_sparse_step(batch_size=bsz,
+                                             batched_sparse_indices=finish_indices_filters,
+                                             signal_tensor_pinned=signal_tensor_pinned,
+                                             version=version,
+                                             scale=1.0/bsz
+                                        )
+                torch.cuda.nvtx.range_pop()
+
+            if version != 3:
+                torch.cuda.nvtx.range_push("cpu_adam:grad.zero_()")
+                parameters_grad.zero_() # clear the grad buffer so that it can be reused in the next iteration. 
+                torch.cuda.nvtx.range_pop()
+
+            torch.cuda.nvtx.range_pop()
+
+        # Create thread for cpuadam
+        if overlap_cpuadam_version == 3:
+            signal_tensor_pinned = torch.zeros(bsz, dtype=torch.int32, device="cpu", pin_memory=True)
+            microbatch_idx = 0
+            cpuadam_worker = threading.Thread(target=cpuadam_thread_v3, args=(bsz,
+                                                                              n_gaussians,
+                                                                              signal_tensor_pinned,
+                                                                              finish_indices_filters,
+                                                                              gaussians.optimizer.cpu_adam,
+                                                                              gaussians._parameters,
+                                                                              parameters_grad_buffer[:n_gaussians, :],
+                                                                              ))
+            cpuadam_worker.start()
+        else:
+            raise ValueError("Invalid overlap_cpuadam_version.")            
+    
+    # accumulate gradients at opacity_gpu, scaling_gpu, rotation_gpu since they are computed afer the activation functions.
+    # no need for xyz since it does not have activation function.
+    opacity_gpu = opacity_gpu_origin.detach().requires_grad_()
+    scaling_gpu = scaling_gpu_origin.detach().requires_grad_()
+    rotation_gpu = rotation_gpu_origin.detach().requires_grad_()
+
+    # declare streams for computationa
+    default_stream = torch.cuda.current_stream()
+
+    # start the training pipeline
+    num_micro_batches = len(batched_cameras)
+    N = gaussians._xyz.shape[0]
+    losses = []
+    shs_retents = [None for i in range(num_micro_batches)]
+
+    grid_size, block_size = args.grid_size_H, 256
+    grid_size_D, block_size_D = args.grid_size_D, 256
+
+    with torch.cuda.stream(comm_stream), torch.no_grad():
+        this_bit = torch.zeros((N,), dtype=torch.uint8, device="cuda")
+        next_bit = torch.zeros((N,), dtype=torch.uint8, device="cuda")
+        retention_vec = torch.empty((N,), dtype=torch.int32, device="cuda")
+
+        shs_grad = torch.zeros(filters[0].shape[0], 48, device="cuda")
+        shs_grad_init_event = torch.cuda.Event()
+        shs_grad_init_event.record(comm_stream)
+
+    for micro_idx in range(num_micro_batches):
+        torch.cuda.nvtx.range_push("micro_batch_idx: " + str(micro_idx))
+        this_filter = filters[micro_idx]
+        this_filter_len = this_filter.shape[0]
+
+        # load the parameters for the first sample in the batch
+        if micro_idx == 0:
+            with torch.cuda.stream(comm_stream), torch.no_grad():
+                # Forward pass
+                shs = torch.empty(this_filter_len, 48, device="cuda", requires_grad=True)
+
+                send_shs2gpu_stream(
+                    shs,
+                    gaussians._parameters,# Why this is a detach? May be this is redundant? 
+                    filters[micro_idx],
+                    grid_size, block_size
+                )
+                shs_retents[micro_idx] = shs.detach()
+                # create an event
+                cpu2gpu_event = torch.cuda.Event(enable_timing=True)
+                cpu2gpu_event.record(comm_stream)
+            
+        else:
+            shs = shs_next # need to verify that is this the correct way to do this? 
+            shs_retents[micro_idx] = shs.detach()
+            cpu2gpu_event = next_cpu2gpu_event
+
+
+        with torch.cuda.stream(comm_stream), torch.no_grad():
+            # Forward pass
+            if micro_idx < num_micro_batches - 1:
+                shs_next = torch.empty(filters[micro_idx+1].shape[0], 48, device="cuda")
+
+                # compute indices on the fly
+                if micro_idx == 0:
+                    this_bit.scatter_(dim=0, index=filters[micro_idx], src=torch.ones(filters[micro_idx].shape[0], dtype=torch.uint8, device="cuda"))
+                    next_bit.scatter_(dim=0, index=filters[micro_idx+1], src=torch.ones(filters[micro_idx+1].shape[0], dtype=torch.uint8, device="cuda"))
+                else:
+                    this_bit, next_bit = next_bit, this_bit
+                    next_bit.scatter_(dim=0, index=filters[micro_idx-1], src=torch.zeros(filters[micro_idx-1].shape[0], dtype=torch.uint8, device="cuda"))
+                    next_bit.scatter_(dim=0, index=filters[micro_idx+1], src=torch.ones(filters[micro_idx+1].shape[0], dtype=torch.uint8, device="cuda"))
+                
+                # NOTE: Here we use `torch.nonzero_static`(torch2.6) instead of `torch.nonzero` to avoid h2d sync.
+                # This stems from the need to know #nonzero_elem before cuda kernel launch.
+                # When using `torch.nonzero_static`, `size`` need to be a scalar on host, otherwise it falls back to blocking.
+                # retention_vec: next index
+                retention_vec.scatter_(dim=0, index=filters[micro_idx+1], src=torch.arange(filters[micro_idx+1].shape[0], dtype=torch.int32, device="cuda"))
+                # idx_h = torch.nonzero(~this_bit & next_bit).flatten() # torch.nonzero() blocks cpu!!!
+                bit_h = ~this_bit & next_bit
+                idx_h = torch.empty((cnt_h[micro_idx],), dtype=torch.int64, device="cuda")
+                idx_h = torch.nonzero_static(bit_h, size=cnt_h[micro_idx]).flatten()
+                host_indices_to_param = idx_h.to(torch.int32)
+                param_indices_from_host = torch.gather(retention_vec, dim=0, index=idx_h)
+                del idx_h, bit_h
+                
+                # idx_d = torch.nonzero(this_bit & next_bit).flatten() # overlap # torch.nonzero() blocks cpu!!!
+                bit_d = this_bit & next_bit
+                idx_d = torch.nonzero_static(bit_d, size=cnt_d[micro_idx]).flatten()
+                param_indices_from_rtnt = torch.gather(retention_vec, dim=0, index=idx_d) # reused in gpu2cpu comm
+                del bit_d
+
+                # retention_vec: this index
+                retention_vec.scatter_(dim=0, index=filters[micro_idx], src=torch.arange(filters[micro_idx].shape[0], dtype=torch.int32, device="cuda"))
+                rtnt_indices_to_param = torch.gather(retention_vec, dim=0, index=idx_d) # reused in gpu2cpu comm
+                del idx_d
+                
+                send_shs2gpu_stream_retention(
+                    shs_next, # shs to fill
+                    gaussians._parameters, # shs on host
+                    shs_retents[micro_idx], # shs from last iter
+                    host_indices_to_param,
+                    rtnt_indices_to_param,
+                    param_indices_from_host,
+                    param_indices_from_rtnt,
+                    grid_size,
+                    block_size,
+                    grid_size_D,
+                    block_size_D
+                )
+                shs_next.requires_grad_(True)
+                del host_indices_to_param, param_indices_from_host
+                
+                # create an event
+                next_cpu2gpu_event = torch.cuda.Event(enable_timing=True)
+                next_cpu2gpu_event.record(comm_stream)
+
+        torch.cuda.nvtx.range_push("forward_pass")
+        filtered_xyz_gpu = torch.gather(xyz_gpu, 0, this_filter.reshape(-1, 1).expand(-1, 3))
+        filtered_opacity_gpu = torch.gather(opacity_gpu, 0, this_filter.reshape(-1, 1))
+        filtered_scaling_gpu = torch.gather(scaling_gpu, 0, this_filter.reshape(-1, 1).expand(-1, 3))
+        filtered_rotation_gpu = torch.gather(rotation_gpu, 0, this_filter.reshape(-1, 1).expand(-1, 4))
+        # sync event of comm_stream with default_stream to make sure shs has been loaded to gpu
+        cpu2gpu_event.wait(default_stream)
+        filtered_shs = shs.requires_grad_(False) # this is a view of the original shs.
+        # filtered_shs = shs
+
+        filtered_filtered_xyz_gpu = filtered_xyz_gpu.detach().requires_grad_()
+
+        # preprocess
+        rendered_image, batched_means2D, batched_radiis, batched_colors_detached, dirs  = pipeline_forward_one_step_shs_inplace(filtered_opacity_gpu,
+                                                filtered_scaling_gpu,
+                                                filtered_rotation_gpu,
+                                                # filtered_xyz_gpu,
+                                                filtered_filtered_xyz_gpu,
+                                                filtered_shs,
+                                                batched_cameras[micro_idx],
+                                                scene,
+                                                gaussians,
+                                                background,
+                                                pipe_args)
+
+        loss = torch_compiled_loss(rendered_image, batched_cameras[micro_idx].original_image)
+        torch.cuda.nvtx.range_pop()
+        torch.cuda.nvtx.range_push("backward_pass")
+        loss.backward()
+        
+        shs_grad_init_event.wait(default_stream) # wait for `shs_grad` to finish init`
+
+        v_dirs = spherical_harmonics_bwd_inplace(degrees_to_use=gaussians.active_sh_degree, dirs=dirs, coeffs=filtered_shs.reshape(1, -1, 16, 3), v_coeffs=shs_grad, v_colors=batched_colors_detached.grad)
+        dirs.backward(v_dirs)
+        filtered_xyz_gpu.backward(filtered_filtered_xyz_gpu.grad)
+        torch.cuda.nvtx.range_pop()
+
+        del rendered_image, batched_colors_detached, dirs, v_dirs, filtered_filtered_xyz_gpu
+
+        # free shs
+        shs = None
+        del filtered_xyz_gpu, filtered_opacity_gpu, filtered_scaling_gpu, filtered_rotation_gpu, filtered_shs
+
+        losses.append(loss.detach())
+        del loss
+
+        gpu2cpu_event = torch.cuda.Event(enable_timing=True)
+        gpu2cpu_event.record(default_stream)
+
+        if not args.offload_shs_grad_before_every_microbatch:
+            if micro_idx < num_micro_batches - 1:
+                with torch.cuda.stream(comm_stream), torch.no_grad():
+                    # compute indices on the fly
+
+                    rtnt_indices_from_grad = param_indices_from_rtnt
+                    grad_indices_to_rtnt = rtnt_indices_to_param
+
+                    # idx_g = torch.nonzero(this_bit & ~next_bit).flatten() # torch.nonzero() blocks cpu!!!
+                    bit_g = this_bit & ~next_bit
+                    idx_g = torch.nonzero_static(bit_g, size=cnt_g[micro_idx]).flatten()
+
+                    host_indices_from_grad = idx_g.to(torch.int32)
+                    grad_indices_to_host = torch.gather(retention_vec, dim=0, index=idx_g)
+                    del idx_g, bit_g
+
+                    # sync event of default_stream with comm_stream
+                    gpu2cpu_event.wait(comm_stream)
+                    shs_retents[micro_idx] = None
+                    shs_grad_next = torch.zeros_like(shs_next, device="cuda")
+
+                    send_shs2cpu_grad_buffer_stream_retention(
+                        shs_grad,
+                        parameters_grad_buffer[:N, :],
+                        shs_grad_next,
+                        host_indices_from_grad,
+                        rtnt_indices_from_grad,
+                        grad_indices_to_host,
+                        grad_indices_to_rtnt,
+                        True,
+                        grid_size,
+                        block_size,
+                        grid_size_D,
+                        block_size_D
+                    )
+                    # del shs_grad
+                    shs_grad = shs_grad_next
+                    # del host_indices_from_grad, rtnt_indices_from_grad, grad_indices_to_host, grad_indices_to_rtnt, param_indices_from_rtnt, rtnt_indices_to_param
+                    shs_grad_init_event.record(comm_stream)
+
+                    if args.overlap_cpuadam:
+                        if args.overlap_cpuadam_version == 3:
+                            # set signal to pinned memory to notify gradients have been sent back to cpu
+                            diff_gaussian_rasterization._C.set_signal(signal_tensor_pinned, microbatch_idx, 1)
+                            microbatch_idx += 1
+                    
+            else:
+                with torch.cuda.stream(comm_stream), torch.no_grad():
+                    gpu2cpu_event.wait(comm_stream)
+
+                    send_shs2cpu_grad_buffer_stream(
+                        shs_grad,
+                        parameters_grad_buffer[:N, :],
+                        filters[-1],
+                        True,
+                        grid_size, block_size
+                    )
+                    
+                    if args.overlap_cpuadam:
+                        if args.overlap_cpuadam_version == 3:
+                            # set signal to pinned memory to notify gradients have been sent back to cpu
+                            diff_gaussian_rasterization._C.set_signal(signal_tensor_pinned, microbatch_idx, 1)
+                            microbatch_idx += 1
+
+        torch.cuda.nvtx.range_pop()
+
+        # Update densification state.
+        update_densification_stats_pipelineoffload_xyzosr(
+            scene,
+            gaussians,
+            int(batched_cameras[micro_idx].image_height),
+            int(batched_cameras[micro_idx].image_width),
+            filters[micro_idx],
+            batched_means2D.grad.squeeze(0),
+            batched_radiis.squeeze(0),
+        )
+
+        batched_means2D.grad = None
+        del batched_means2D, batched_radiis
+
+    opacity_gpu_origin.backward(opacity_gpu.grad)
+    scaling_gpu_origin.backward(scaling_gpu.grad)
+    rotation_gpu_origin.backward(rotation_gpu.grad)
+
+    if args.overlap_cpuadam:
+        if overlap_cpuadam_version == 3:
+            assert microbatch_idx == bsz, "microbatch_idx should be equal to bsz."
+        if overlap_cpuadam_version not in [0, 3]:
+            cpuadam_worker.start()
+        assert args.lr_scale_mode == "sqrt", "Overlap CPUAdam only supports sqrt lr scaling"
+        assert args.gpu_cache == "xyzosr", "Overlap CPUAdam only supports xyzosr cache"
+        assert not args.stop_update_param, "Overlap CPUAdam does not support stop_update_param"
+        # only perform gpu adam
+        for param in gaussians.all_parameters()[:4]: # the first 4 parameters are on gpu
+            if param.grad is not None:
+                param.grad /= args.bsz
+        if not args.stop_update_param:
+            gaussians.optimizer.gpu_adam.step()
+        gaussians.optimizer.gpu_adam.zero_grad(set_to_none=True)
+        cpuadam_worker.join()
+    else:
+        torch.cuda.synchronize() # we need to make sure gradients have all been sent back to cpu. 
+        gaussians._parameters.grad = gaussians.parameters_grad_buffer[:N, :]
+
+        timers = utils.get_timers()
+        timers.start("grad scale + optimizer step + zero grad")
+        for param in gaussians.all_parameters():
+            if param.grad is not None:
+                param.grad /= args.bsz
+        if not args.stop_update_param:
+            gaussians.optimizer.step()
+        gaussians.optimizer.zero_grad(set_to_none=True)
+        gaussians.parameters_grad_buffer[:N, :].zero_()
+        timers.stop("grad scale + optimizer step + zero grad")
+
+    torch.cuda.synchronize()
+    return losses
+
 def baseline_accumGrads_micro_step(
     means3D,
     opacities,
@@ -2941,6 +3481,17 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
                 )
             elif args.retention == 3:
                 losses = pipeline_offload_retention_optimized_v3_impl(
+                    gaussians,
+                    scene,
+                    batched_cameras,
+                    gaussians.parameters_grad_buffer,
+                    background,
+                    pipe_args,
+                    comm_stream,
+                    perm_generator
+                )
+            elif args.retention == 4:
+                losses = pipeline_offload_retention_optimized_v4_impl(
                     gaussians,
                     scene,
                     batched_cameras,
