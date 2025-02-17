@@ -219,7 +219,11 @@ def readColmapSceneInfo(path, images, eval, llffhold=10):
 
     nerf_normalization = getNerfppNorm(train_cam_infos)
 
-    ply_path = os.path.join(path, "sparse/0/points3D.ply")
+    args = utils.get_args()
+    if args.dense_ply_file == "":
+        ply_path = os.path.join(path, "sparse/0/points3D.ply")
+    else:
+        ply_path = args.dense_ply_file
     bin_path = os.path.join(path, "sparse/0/points3D.bin")
     txt_path = os.path.join(path, "sparse/0/points3D.txt")
     if not os.path.exists(ply_path):

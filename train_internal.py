@@ -69,6 +69,7 @@ def calculate_filters(
     scaling_gpu,
     rotation_gpu
 ):
+    args = utils.get_args()
     # calculate filters for all cameras
     filters = []
     with torch.no_grad():
@@ -91,8 +92,9 @@ def calculate_filters(
                 scales=scaling_gpu,
                 viewmats=batched_viewmats,
                 Ks=batched_Ks,
-                width=int(camera.image_width),
-                height=int(camera.image_height),
+                radius_clip=args.radius_clip,
+                width=int(utils.get_img_width()),
+                height=int(utils.get_img_height()),
                 packed=True,
             )# TODO: this function is too heavy to compute the filters. we can have much cheaper calculation. 
         ) # (B, N), (B, N, 2), (B, N), (B, N, 3), (B, N)
@@ -146,8 +148,8 @@ def pipeline_forward_one_step(
     # K = camera.create_k_on_gpu() # create K now, which may invoke cpu-gpu transfer
     K = camera.K
     n_selected = filtered_xyz_gpu.shape[0]
-    image_width = int(camera.image_width)
-    image_height = int(camera.image_height)
+    image_width = int(utils.get_img_width())
+    image_height = int(utils.get_img_height())
     tile_size = 16
     B = 1 # micro batch size is just 1
 
@@ -159,8 +161,8 @@ def pipeline_forward_one_step(
             scales=filtered_scaling_gpu,
             viewmats=viewmat.unsqueeze(0),
             Ks=K.unsqueeze(0),
-            width=int(camera.image_width),
-            height=int(camera.image_height),
+            width=image_width,
+            height=image_height,
             packed=False,
         )
     ) # (1, N), (1, N, 2), (1, N), (1, N, 3), (1, N)
@@ -252,8 +254,8 @@ def pipeline_forward_one_step_shs_inplace(
     # K = camera.create_k_on_gpu() # create K now, which may invoke cpu-gpu transfer
     K = camera.K
     n_selected = filtered_xyz_gpu.shape[0]
-    image_width = int(camera.image_width)
-    image_height = int(camera.image_height)
+    image_width = int(utils.get_img_width())
+    image_height = int(utils.get_img_height())
     tile_size = 16
     B = 1 # micro batch size is just 1
 
@@ -265,8 +267,8 @@ def pipeline_forward_one_step_shs_inplace(
             scales=filtered_scaling_gpu,
             viewmats=viewmat.unsqueeze(0),
             Ks=K.unsqueeze(0),
-            width=int(camera.image_width),
-            height=int(camera.image_height),
+            width=image_width,
+            height=image_height,
             packed=False,
         )
     ) # (1, N), (1, N, 2), (1, N), (1, N, 3), (1, N)
@@ -848,8 +850,8 @@ def pipeline_offload_impl(
         update_densification_stats_pipelineoffload_xyzosr(
             scene,
             gaussians,
-            int(batched_cameras[micro_idx].image_height),
-            int(batched_cameras[micro_idx].image_width),
+            int(utils.get_img_height()),
+            int(utils.get_img_width()),
             filters[micro_idx],
             batched_means2D.grad.squeeze(0),
             batched_radiis.squeeze(0),
@@ -1581,8 +1583,8 @@ def pipeline_offload_retention_impl(
         update_densification_stats_pipelineoffload_xyzosr(
             scene,
             gaussians,
-            int(batched_cameras[micro_idx].image_height),
-            int(batched_cameras[micro_idx].image_width),
+            int(utils.get_img_height()),
+            int(utils.get_img_width()),
             filters[micro_idx],
             batched_means2D.grad.squeeze(0),
             batched_radiis.squeeze(0),
@@ -2147,8 +2149,8 @@ def pipeline_offload_retention_optimized_impl(
         update_densification_stats_pipelineoffload_xyzosr(
             scene,
             gaussians,
-            int(batched_cameras[micro_idx].image_height),
-            int(batched_cameras[micro_idx].image_width),
+            int(utils.get_img_height()),
+            int(utils.get_img_width()),
             filters[micro_idx],
             batched_means2D.grad.squeeze(0),
             batched_radiis.squeeze(0),
@@ -2584,8 +2586,8 @@ def pipeline_offload_retention_optimized_v3_impl(
         update_densification_stats_pipelineoffload_xyzosr(
             scene,
             gaussians,
-            int(batched_cameras[micro_idx].image_height),
-            int(batched_cameras[micro_idx].image_width),
+            int(utils.get_img_height()),
+            int(utils.get_img_width()),
             filters[micro_idx],
             batched_means2D.grad.squeeze(0),
             batched_radiis.squeeze(0),
@@ -2715,6 +2717,7 @@ def pipeline_offload_retention_optimized_v4_impl(
 
             batched_cameras = [batched_cameras[i] for i in ordered_cams]
             filters = [filters[i] for i in ordered_cams]
+            sparsity = [len(filters[i]) / float(n_gaussians) for i in ordered_cams]
 
             torch.cuda.nvtx.range_push("precompute sums")
             for i in range(bsz-1):
@@ -2741,6 +2744,7 @@ def pipeline_offload_retention_optimized_v4_impl(
             torch.cuda.nvtx.range_pop()
 
             finish_indices_filters = update_ls_cpu
+
             del gs_bitmap
 
             assert len(finish_indices_filters) == bsz + 1, "len(finish_indices_filters) should be equal to bsz + 1"
@@ -3028,8 +3032,8 @@ def pipeline_offload_retention_optimized_v4_impl(
         update_densification_stats_pipelineoffload_xyzosr(
             scene,
             gaussians,
-            int(batched_cameras[micro_idx].image_height),
-            int(batched_cameras[micro_idx].image_width),
+            int(utils.get_img_height()),
+            int(utils.get_img_width()),
             filters[micro_idx],
             batched_means2D.grad.squeeze(0),
             batched_radiis.squeeze(0),
@@ -3074,7 +3078,7 @@ def pipeline_offload_retention_optimized_v4_impl(
         timers.stop("grad scale + optimizer step + zero grad")
 
     torch.cuda.synchronize()
-    return losses
+    return losses, ordered_cams, sparsity
 
 def baseline_accumGrads_micro_step(
     means3D,
@@ -3089,8 +3093,10 @@ def baseline_accumGrads_micro_step(
     tile_size=16,
 ):
     # Prepare camera param.
-    image_width = int(camera.image_width)
-    image_height = int(camera.image_height)
+    # image_width = int(camera.image_width)
+    # image_height = int(camera.image_height)
+    image_width = int(utils.get_img_width())
+    image_height = int(utils.get_img_height())
     tanfovx = math.tan(camera.FoVx * 0.5)
     tanfovy = math.tan(camera.FoVy * 0.5)
     focal_length_x = image_width / (2 * tanfovx)
@@ -3205,8 +3211,8 @@ def baseline_accumGrads_impl(
             update_densification_stats_baseline_accumGrads(
                 scene,
                 gaussians,
-                int(camera.image_height),
-                int(camera.image_width),
+                int(utils.get_img_height()),
+                int(utils.get_img_width()),
                 means2D.grad,
                 radiis,
             )
@@ -3491,7 +3497,7 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
                     perm_generator
                 )
             elif args.retention == 4:
-                losses = pipeline_offload_retention_optimized_v4_impl(
+                losses, ordered_cams, sparsity = pipeline_offload_retention_optimized_v4_impl(
                     gaussians,
                     scene,
                     batched_cameras,
@@ -3513,7 +3519,8 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
                     perm_generator
                 )
             batched_screenspace_pkg = {}
-
+            if args.retention == 4:
+                batched_cameras = [batched_cameras[i] for i in ordered_cams]
             
             # Sync losses in the batch
             timers.start("sync_loss_and_log")
@@ -3528,10 +3535,11 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
             train_dataset.update_losses(batched_loss_cpu)
             # Logging
             batched_loss_cpu = [round(loss, 6) for loss in batched_loss_cpu]
-            log_string = "iteration[{},{}), loss: {} image: {}\n".format(
+            log_string = "iteration[{},{}), loss: {} sparsity: {} image: {}\n".format(
                 iteration,
                 iteration + args.bsz,
                 batched_loss_cpu,
+                sparsity,
                 [viewpoint_cam.image_name for viewpoint_cam in batched_cameras],
             )
             log_file.write(log_string)
@@ -3587,12 +3595,6 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
                         )
                     )
                     timers.stop("preprocess_final")
-                    
-                    if ((iteration + cam_id) % args.log_interval) == 1:
-                        num_visible = batched_screenspace_pkg["batched_locally_preprocessed_visibility_filter"].sum().item()
-                        log_file.write(
-                            "<<< # iteration: {}, visible gaussians this iter = {}/{} (%{:.2f}) >>>\n".format((iteration + cam_id), num_visible, gaussians._xyz.shape[0], (100 * num_visible / gaussians._xyz.shape[0]))
-                        )
                     
                     timers.start("render_final")
                     batched_image, batched_compute_locally = gsplat_render_final(

@@ -25,14 +25,15 @@ from PIL import Image
 
 
 def loadCam(args, id, cam_info, decompressed_image=None, return_image=False):
-    orig_w, orig_h = cam_info.width, cam_info.height
-    assert (
-        orig_w == utils.get_img_width() and orig_h == utils.get_img_height()
-    ), "All images should have the same size. "
+    # orig_w, orig_h = cam_info.width, cam_info.height
+    # assert (
+    #     orig_w == utils.get_img_width() and orig_h == utils.get_img_height()
+    # ), f"All images should have the same size. Found {orig_w}, {utils.get_img_width()}, {orig_h}, and {utils.get_img_height()}."
 
     args = get_args()
     log_file = get_log_file()
-    resolution = orig_w, orig_h
+    # resolution = orig_w, orig_h
+    resolution = utils.get_img_width(), utils.get_img_height()
     # NOTE: we do not support downsampling here.
 
     # may use cam_info.uid
@@ -86,10 +87,11 @@ def loadCam(args, id, cam_info, decompressed_image=None, return_image=False):
     )
 
 def loadCam_raw_from_disk(args, id, cam_info, to_gpu=False):
-    orig_w, orig_h = cam_info.width, cam_info.height
-    assert (
-        orig_w == utils.get_img_width() and orig_h == utils.get_img_height()
-    ), "All images should have the same size. "
+    # orig_w, orig_h = cam_info.width, cam_info.height
+    # assert (
+    #     orig_w == utils.get_img_width() and orig_h == utils.get_img_height()
+    # ), "All images should have the same size. "
+    orig_h, orig_w = utils.get_img_size()
     
     # Get dececoded gt_image from disk
     with open(os.path.join(args.decode_dataset_path, 'dataset_raw', (cam_info.image_name.lstrip('/') + '.raw')), 'rb') as raw_file:
@@ -242,16 +244,21 @@ def decompressed_images_from_camInfos_multiprocess_sharedmem(
 
 def predecode_dataset_to_disk(cam_infos, args):
     args = get_args()
-    for id, c in tqdm(enumerate(cam_infos), total=len(cam_infos)):
-        img = Image.open(c.image_path)
-        raw_data = img.tobytes()
-        raw_data_path = os.path.join(args.decode_dataset_path, 'dataset_raw', (c.image_name.lstrip('/') + '.raw'))
-        os.makedirs(os.path.dirname(raw_data_path), exist_ok=True)
-        with open(raw_data_path, 'wb+') as raw_file:
-            raw_file.write(raw_data)
+    if (not args.reuse_decoded_dataset) or (not os.path.isdir(os.path.join(args.decode_dataset_path, 'dataset_raw'))):
+        orig_h, orig_w = utils.get_img_size()
+        for id, c in tqdm(enumerate(cam_infos), total=len(cam_infos)):
+            img = Image.open(c.image_path)
+            img = img.crop((0, 0, orig_w, orig_h)) # crop the image to the minimum size in dataset
+            raw_data = img.tobytes()
+            raw_data_path = os.path.join(args.decode_dataset_path, 'dataset_raw', (c.image_name.lstrip('/') + '.raw'))
+            os.makedirs(os.path.dirname(raw_data_path), exist_ok=True)
+            with open(raw_data_path, 'wb+') as raw_file:
+                raw_file.write(raw_data)
 
 def clean_up_disk(args):
-    shutil.rmtree(os.path.join(args.decode_dataset_path, 'dataset_raw'))
+    args = get_args()
+    if not args.reuse_decoded_dataset:
+        shutil.rmtree(os.path.join(args.decode_dataset_path, 'dataset_raw'))
 
 def cameraList_from_camInfos(cam_infos, args):
     args = get_args()

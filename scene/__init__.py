@@ -95,10 +95,10 @@ class Scene:
         self.cameras_extent = scene_info.nerf_normalization["radius"]
         self.scene_info = scene_info # For torch dataloader, save scene_info
 
-        # Set image size to global variable
+        # Set image size to global varaible. In case not all image sizes are identical, choose the minimum.
         orig_w, orig_h = (
-            scene_info.train_cameras[0].width,
-            scene_info.train_cameras[0].height,
+            min([camera.width for camera in scene_info.train_cameras + scene_info.test_cameras]),
+            min([camera.height for camera in scene_info.train_cameras + scene_info.test_cameras])
         )
         utils.set_img_size(orig_h, orig_w)
         # Dataset size in GB
@@ -160,9 +160,9 @@ class Scene:
             
             if len(train_cameras) > 0:
                 log_file.write(
-                    "TrainImage size: {}x{}\n".format(
-                        train_cameras[0].height,
-                        train_cameras[0].width,
+                    "Train Image size: {}x{}\n".format(
+                        orig_h,
+                        orig_w
                     )
                 )
             
@@ -178,8 +178,8 @@ class Scene:
                 if len(test_cameras) > 0:
                     log_file.write(
                         "Test Image size: {}x{}\n".format(
-                            test_cameras[0].height,
-                            test_cameras[0].width,
+                            orig_h,
+                            orig_w
                         )
                     )
         
@@ -201,8 +201,8 @@ class Scene:
             if len(self.train_cameras) > 0:
                 log_file.write(
                     "Image size: {}x{}\n".format(
-                        self.train_cameras[0].image_height,
-                        self.train_cameras[0].image_width,
+                        orig_h,
+                        orig_w
                     )
                 )
 
@@ -222,8 +222,8 @@ class Scene:
                 if len(self.test_cameras) > 0:
                     log_file.write(
                         "Image size: {}x{}\n".format(
-                            self.test_cameras[0].image_height,
-                            self.test_cameras[0].image_width,
+                            orig_h,
+                            orig_w
                         )
                     )
 

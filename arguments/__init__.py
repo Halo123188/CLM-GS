@@ -86,12 +86,14 @@ class AuxiliaryParams(ParamGroup):
         self.accumulate_grads = False
         self.torch_dataloader = False
         self.decode_dataset_to_disk = False
+        self.reuse_decoded_dataset = False
         self.decode_dataset_path = "/tmp"
         self.num_workers = 0
         self.sharing_strategy = "default" # "default" ("file_descriptor"), or "file_system" [see https://pytorch.org/docs/stable/multiprocessing.html#sharing-strategies]
         self.gpu_cache = "no_cache"
         self.gpu = 0
         self.inplace_zero_grad = False
+        self.dense_ply_file = ""
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args): 
@@ -102,6 +104,7 @@ class AuxiliaryParams(ParamGroup):
 class ModelParams(ParamGroup):
     def __init__(self, parser, sentinel=False):
         self.sh_degree = 3
+        self.radius_clip = 0.0
         self._source_path = ""
         self._model_path = "/tmp/gaussian_splatting"
         self._images = "images"
