@@ -3353,7 +3353,7 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
     perm_generator = torch.Generator(device="cuda")
     perm_generator.manual_seed(1)
 
-    if args.log_sampled_filter != 0:
+    if args.log_sampled_filters != 0:
         assert args.retention == 4, "Only implemented for retention v4"
         selected_batches = torch.randperm(min(len(scene.train_cameras_info), args.iterations) // args.bsz, device="cuda", generator=perm_generator)[:args.log_sampled_filter]
         selected_batches = [b * args.bsz + 1 for b in selected_batches]
