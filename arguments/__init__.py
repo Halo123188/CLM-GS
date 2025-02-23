@@ -94,6 +94,8 @@ class AuxiliaryParams(ParamGroup):
         self.gpu = 0
         self.inplace_zero_grad = False
         self.dense_ply_file = ""
+        self.fused_adam = "default"
+        self.sparse_adam = False
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args): 

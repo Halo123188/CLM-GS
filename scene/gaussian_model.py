@@ -23,7 +23,7 @@ from utils.general_utils import strip_symmetric, build_scaling_rotation
 import utils.general_utils as utils
 import torch.distributed as dist
 import cpu_adam
-from optimizer import UnifiedAdam
+from optimizer import UnifiedAdam, SelectiveAdam
 
 lr_scale_fns = {
     "linear": lambda x: x,
@@ -505,7 +505,8 @@ class GaussianModel:
                     weight_decay=0,
                     amsgrad=False,
                     adamw_mode=False,
-                    fp32_optimizer_states=True
+                    fp32_optimizer_states=True,
+                    fused=True if args.fused_adam == "torch_fused" else False
                 )
                 
             else:
@@ -546,7 +547,10 @@ class GaussianModel:
                     "name": "rotation",
                 },
             ]
-            self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
+            if args.sparse_adam:
+                self.optimizer = SelectiveAdam(l, lr=0.0, eps=1e-15)
+            else:
+                self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15, fused=True if args.fused_adam == "torch_fused" else False)
 
         # Scale learning rates according to bsz.
         bsz = args.bsz

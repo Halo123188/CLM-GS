@@ -3357,7 +3357,8 @@ def pipeline_offload_retention_optimized_v5_impl(
                                              batched_sparse_indices=finish_indices_filters,
                                              signal_tensor_pinned=signal_tensor_pinned,
                                              version=version,
-                                             scale=1.0/bsz
+                                             scale=1.0/bsz,
+                                             sparse_adam=args.sparse_adam
                                         )
                 torch.cuda.nvtx.range_pop()
 
