@@ -104,6 +104,8 @@ class AuxiliaryParams(ParamGroup):
         self.fairBaseline = False
         self.fairBraindead = False
         self.braindead_pin = True
+        self.delay_cpuadam_notaccessed_gs = False
+        self.reorder_by_min_sparsity_at_end = False
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args): 

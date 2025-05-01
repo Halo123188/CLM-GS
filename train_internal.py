@@ -3538,6 +3538,14 @@ def pipeline_offload_retention_optimized_v5_impl(
 
                 torch.cuda.nvtx.range_push("solve order: tsp")
                 ordered_cams = fast_tsp.find_tour(distance_matrix, 0.001)
+                # find the minimum sparsity camera
+                if args.reorder_by_min_sparsity_at_end:
+                    min_sparsity_i = bsz - 1
+                    for k in range(0, bsz-1):
+                        if len(filters[ordered_cams[k]]) < len(filters[ordered_cams[min_sparsity_i]]):
+                            min_sparsity_i = k
+                    ordered_cams = ordered_cams[min_sparsity_i+1:] + ordered_cams[:min_sparsity_i+1]
+
                 torch.cuda.nvtx.range_pop()
                 batched_cameras = [batched_cameras[i] for i in ordered_cams]
                 filters = [filters[i] for i in ordered_cams]
@@ -3596,6 +3604,16 @@ def pipeline_offload_retention_optimized_v5_impl(
                 torch.cuda.nvtx.range_pop()
 
                 finish_indices_filters = update_ls_cpu
+                if args.delay_cpuadam_notaccessed_gs:
+                    finish_indices_filters = list(finish_indices_filters)
+
+                    filter_0 = finish_indices_filters[0] # a tensor
+                    filter_last = finish_indices_filters[-1] # a tensor
+                    
+                    finish_indices_filters[0] = filter_0[:0] # empty tensor
+                    finish_indices_filters[-1] = torch.cat([filter_last, filter_0], dim=0) # a tensor
+
+                    finish_indices_filters = tuple(finish_indices_filters)
 
                 assert len(finish_indices_filters) == bsz + 1, "len(finish_indices_filters) should be equal to bsz + 1"
                 assert sum([len(indicies) for indicies in finish_indices_filters]) == n_gaussians, f"{sum([len(indicies) for indicies in finish_indices_filters])}, {n_gaussians}"
