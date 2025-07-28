@@ -514,14 +514,18 @@ def readCityInfo(
         extension,
         undistorted,
     )
-    test_cam_infos = readCamerasFromTransformsCity(
-        path,
-        test_json_path,
-        random_background,
-        white_background,
-        extension,
-        undistorted,
-    )
+
+    if args.eval:
+        test_cam_infos = readCamerasFromTransformsCity(
+            path,
+            test_json_path,
+            random_background,
+            white_background,
+            extension,
+            undistorted,
+        )
+    else:
+        test_cam_infos = []
     print("Load Cameras(train, test): ", len(train_cam_infos), len(test_cam_infos))
 
     nerf_normalization = getNerfppNorm(train_cam_infos)
