@@ -77,7 +77,6 @@ class AuxiliaryParams(ParamGroup):
         self.load_ply_max = 1_000_000
         self.load_pt_path = ""
         self.llffhold = 8
-        self.backend = "default" # "default", "gsplat"
         self.offload = False
         self.pipelined_offload = False
         self.braindeath_offload = False

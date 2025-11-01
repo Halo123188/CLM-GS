@@ -3,10 +3,7 @@ import torch
 import json
 from utils.loss_utils import l1_loss
 from gaussian_renderer import (
-    distributed_preprocess3dgs_and_all2all_final,
-    render_final,
     gsplat_distributed_preprocess3dgs_and_all2all_final,
-    gsplat_distributed_preprocess3dgs_and_all2all_offloaded_cacheXYZOSR,
     gsplat_render_final,
 )
 from torch.cuda import nvtx
@@ -1318,10 +1315,7 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
 
     # Init background
     background = None
-    if args.backend == "gsplat":
-        bg_color = [1, 1, 1] if dataset_args.white_background else None
-    else:
-        bg_color = [1, 1, 1] if dataset_args.white_background else [0, 0, 0]
+    bg_color = [1, 1, 1] if dataset_args.white_background else None
 
     if bg_color is not None:
         background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
@@ -1555,31 +1549,28 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
                 scene,
                 pipe_args,
                 background,
-                args.backend,
                 args.offload,
             )
             end2end_timers.start()
 
             # Densification
             # utils.memory_report("before densification")
-            if args.backend == "gsplat":
-                if args.offload:
-                    gsplat_densification(
-                        iteration, scene, gaussians, batched_screenspace_pkg, offload=args.offload, densify_only=True
-                    )
-                elif args.accumulate_grads:
-                    raise ValueError("Accumulate grads is not supported")
-                else:  
-                    raise ValueError("Invalid offload value")
-                if not args.disable_auto_densification and iteration <= args.densify_until_iter and iteration > args.densify_from_iter and utils.check_update_at_this_iter(
-                    iteration, args.bsz, args.densification_interval, 0
-                ):
-                    means3D_all = None
-                    send2gpu_filter = None
-                    send2gpu_filter_cpu = None
+            if args.offload:
+                gsplat_densification(
+                    iteration, scene, gaussians, batched_screenspace_pkg, offload=args.offload, densify_only=True
+                )
+            elif args.accumulate_grads:
+                raise ValueError("Accumulate grads is not supported")
+            else:  
+                raise ValueError("Invalid offload value")
+            if not args.disable_auto_densification and iteration <= args.densify_until_iter and iteration > args.densify_from_iter and utils.check_update_at_this_iter(
+                iteration, args.bsz, args.densification_interval, 0
+            ):
+                means3D_all = None
+                send2gpu_filter = None
+                send2gpu_filter_cpu = None
                     
-            else:
-                raise ValueError("Invalid backend value")
+
             # utils.memory_report("after densification and before freeing activation states")
             
             # Free activation states
@@ -1757,7 +1748,7 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
 
 
 def training_report(
-    iteration, l1_loss, testing_iterations, scene: Scene, pipe_args, background, backend, offload=False
+    iteration, l1_loss, testing_iterations, scene: Scene, pipe_args, background, offload=False
 ):
     args = utils.get_args()
     log_file = utils.get_log_file()
@@ -1829,7 +1820,6 @@ def training_report(
                         
                         elif args.offload:
                             assert args.gpu_cache == "xyzosr"
-                            assert args.backend == "gsplat"
                             rendered_image = offload_eval_one_cam(
                                 camera=camera,
                                 gaussians=scene.gaussians,
@@ -1934,7 +1924,6 @@ def training_report(
                         
                         elif args.offload:
                             assert args.gpu_cache == "xyzosr"
-                            assert args.backend == "gsplat"
                             rendered_image = offload_eval_one_cam(
                                 camera=camera,
                                 gaussians=scene.gaussians,
@@ -1943,40 +1932,24 @@ def training_report(
                             )
                             batched_image.append(rendered_image)
                         else:
-                            if args.backend == "gsplat":
-                                batched_screenspace_pkg = (
-                                    gsplat_distributed_preprocess3dgs_and_all2all_final(
-                                        [camera],
-                                        scene.gaussians,
-                                        pipe_args,
-                                        background,
-                                        batched_strategies=[strategy],
-                                        mode="test",
-                                        offload=False,
-                                    )
+                            batched_screenspace_pkg = (
+                                gsplat_distributed_preprocess3dgs_and_all2all_final(
+                                    [camera],
+                                    scene.gaussians,
+                                    pipe_args,
+                                    background,
+                                    batched_strategies=[strategy],
+                                    mode="test",
+                                    offload=False,
                                 )
-                                images, _ = gsplat_render_final(
-                                    batched_screenspace_pkg, [strategy]
-                                )
-                                
-                                batched_image.append(images[0])
-                                del batched_screenspace_pkg
-                            else:
-                                batched_screenspace_pkg = (
-                                    distributed_preprocess3dgs_and_all2all_final(
-                                        [camera],
-                                        scene.gaussians,
-                                        pipe_args,
-                                        background,
-                                        batched_strategies=[strategy],
-                                        mode="test",
-                                    )
-                                )
-                                images, _ = render_final(
-                                    batched_screenspace_pkg, [strategy]
-                                )
-                                batched_image.append(images[0])
-                                del batched_screenspace_pkg
+                            )
+                            images, _ = gsplat_render_final(
+                                batched_screenspace_pkg, [strategy]
+                            )
+                            
+                            batched_image.append(images[0])
+                            del batched_screenspace_pkg
+
 
                     for camera_id, (image, gt_camera) in enumerate(
                         zip(batched_image, batched_cameras)
