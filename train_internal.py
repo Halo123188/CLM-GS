@@ -382,7 +382,7 @@ def pipeline_offload_retention_optimized_v5_impl(
     # Sort cameras using these filters when overlap_cpuadam is enabled.
     overlap_cpuadam_version = args.overlap_cpuadam_version
     order_calculation_version = args.order_calculation_version
-    if args.overlap_cpuadam or args.retention != 0:
+    if args.overlap_cpuadam:
         torch.cuda.nvtx.range_push("sort cameras")
         
         if order_calculation_version == 7:# TODO: can I only keep this version 7? 
@@ -1482,22 +1482,20 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
 
             N = gaussians._xyz.shape[0]
             
-            if args.retention == 5:
-                losses, ordered_cams, sparsity = pipeline_offload_retention_optimized_v5_impl(
-                    gaussians,
-                    scene,
-                    batched_cameras,
-                    gaussians.parameters_grad_buffer,
-                    background,
-                    pipe_args,
-                    comm_stream,
-                    perm_generator,
-                )
-            else:
-                raise ValueError("Invalid retention value")
+
+            losses, ordered_cams, sparsity = pipeline_offload_retention_optimized_v5_impl(
+                gaussians,
+                scene,
+                batched_cameras,
+                gaussians.parameters_grad_buffer,
+                background,
+                pipe_args,
+                comm_stream,
+                perm_generator,
+            )
+
             batched_screenspace_pkg = {}
-            if args.retention == 4 or args.retention == 5:
-                batched_cameras = [batched_cameras[i] for i in ordered_cams]
+            batched_cameras = [batched_cameras[i] for i in ordered_cams]
             
             # Sync losses in the batch
             timers.start("sync_loss_and_log")
@@ -1511,16 +1509,15 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
             # Update Epoch Statistics
             train_dataset.update_losses(batched_loss_cpu)
             # Logging
-            if args.retention == 4 or args.retention == 5:
-                batched_loss_cpu = [round(loss, 6) for loss in batched_loss_cpu]
-                log_string = "iteration[{},{}), loss: {} sparsity: {} image: {}\n".format(
-                    iteration,
-                    iteration + args.bsz,
-                    batched_loss_cpu,
-                    sparsity,
-                    [viewpoint_cam.image_name for viewpoint_cam in batched_cameras],
-                )
-                log_file.write(log_string)
+            batched_loss_cpu = [round(loss, 6) for loss in batched_loss_cpu]
+            log_string = "iteration[{},{}), loss: {} sparsity: {} image: {}\n".format(
+                iteration,
+                iteration + args.bsz,
+                batched_loss_cpu,
+                sparsity,
+                [viewpoint_cam.image_name for viewpoint_cam in batched_cameras],
+            )
+            log_file.write(log_string)
 
         else:
             raise ValueError("Accumulate grads is not supported")
