@@ -5,13 +5,12 @@ from utils.loss_utils import l1_loss
 from torch.cuda import nvtx
 from torch.utils.data import DataLoader
 from scene import Scene, GaussianModel, SceneDataset, TorchSceneDataset, custom_collate_fn
-from utils.general_utils import prepare_output_and_logger, globally_sync_for_timer
+from utils.general_utils import prepare_output_and_logger
 import utils.general_utils as utils
 from utils.timer import Timer, End2endTimer
 from tqdm import tqdm
 from utils.image_utils import psnr
 from densification import (
-    densification, 
     gsplat_densification, 
     update_densification_stats_pipelineoffload_xyzosr,
     update_densification_stats_baseline_accumGrads,

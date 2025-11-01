@@ -127,11 +127,6 @@ def check_enable_python_timer():
     )
 
 
-def globally_sync_for_timer():
-    # Single GPU mode - no synchronization needed
-    pass
-
-
 def check_update_at_this_iter(iteration, bsz, update_interval, update_residual):
     residual_l = iteration % update_interval
     residual_r = residual_l + bsz
