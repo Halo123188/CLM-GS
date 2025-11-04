@@ -194,7 +194,6 @@ class DebugParams(ParamGroup):
         self.reset_each_iter = False # Reset max memory for  each iteration
         self.save_tensors = False # Save model parameters as .pt file
 
-        self.manual_gc = False
         self.comm_stream_priority = 0
         self.subsample_ratio = 1.0
         self.upsample_ratio = 0.0

@@ -1277,9 +1277,28 @@ def pipeline_forward_one_step(
     
 
 def training(dataset_args, opt_args, pipe_args, args, log_file):
-
-    # Init auxiliary tools
-    gc.disable()
+    """
+    Main training loop for Gaussian Splatting with parameter offloading.
+    
+    This function orchestrates the entire training process:
+    1. Initialize scene, gaussians, and data loaders
+    2. Main iteration loop: load data → forward/backward → optimize → densify
+    3. Periodic evaluation, checkpointing, and logging
+    4. Cleanup and final statistics reporting
+    
+    The training supports two main offloading strategies:
+    - braindeath_offload: Simple baseline with bulk parameter transfers
+    - pipelined_offload: Sophisticated retention-based approach with overlapped comm/compute
+    """
+    
+    # ============================================================================
+    # STAGE 1: INITIALIZATION
+    # ============================================================================
+    
+    # ------------------------------------------------------------------------
+    # 1.1: Setup auxiliary tools and GPU configuration
+    # ------------------------------------------------------------------------
+    gc.disable()  # Disable Python GC for better performance control
 
     torch.cuda.set_device(args.gpu)
     timers = Timer(args)
@@ -1287,18 +1306,21 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
     prepare_output_and_logger(dataset_args)
     utils.log_cpu_memory_usage("at the beginning of training")
     start_from_this_iteration = 1
+    
+    # Configure multiprocessing sharing strategy if needed
     if args.sharing_strategy != "default":
         torch.multiprocessing.set_sharing_strategy(args.sharing_strategy)
-    
-    # gc.set_debug(gc.DEBUG_LEAK)
 
-    # Init parameterized scene
+    # ------------------------------------------------------------------------
+    # 1.2: Initialize scene and gaussian model
+    # ------------------------------------------------------------------------
     gaussians = GaussianModel(sh_degree=dataset_args.sh_degree)
 
     with torch.no_grad():
         scene = Scene(args, gaussians)
         gaussians.training_setup(opt_args)
 
+        # Restore from checkpoint if specified
         if args.start_checkpoint != "":
             model_params, start_from_this_iteration = utils.load_checkpoint(args)
             gaussians.restore(model_params, opt_args)
@@ -1312,31 +1334,37 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
         scene.log_scene_info_to_file(log_file, "Scene Info Before Training")
     utils.check_initial_gpu_memory_usage("after init and before training loop")
 
-    # Init dataset
+    # ------------------------------------------------------------------------
+    # 1.3: Initialize data loader
+    # ------------------------------------------------------------------------
     train_dataset = OffloadSceneDataset(scene.getTrainCamerasInfo())
     dataloader = DataLoader(
         train_dataset,
         batch_size=args.bsz,
-        num_workers=1, # use one worker by default
-        shuffle=True,
-        drop_last=True,
-        persistent_workers=True,
-        pin_memory=True,
+        num_workers=1,          # Single worker for sequential loading
+        shuffle=True,            # Randomize camera order
+        drop_last=True,          # Drop incomplete batches
+        persistent_workers=True, # Keep workers alive between epochs
+        pin_memory=True,         # Enable faster GPU transfers
         collate_fn=(lambda batch: batch)
     )
     dataloader_iter = iter(dataloader)
 
-    # Init background
+    # ------------------------------------------------------------------------
+    # 1.4: Initialize background and CUDA streams
+    # ------------------------------------------------------------------------
     background = None
     bg_color = [1, 1, 1] if dataset_args.white_background else None
 
     if bg_color is not None:
         background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
         
-    # declare stream for communication
+    # Dedicated stream for CPU↔GPU communication (overlapped with compute)
     comm_stream = torch.cuda.Stream(device=args.gpu, priority=args.comm_stream_priority)
 
-    # Training Loop
+    # ------------------------------------------------------------------------
+    # 1.5: Initialize training loop state
+    # ------------------------------------------------------------------------
     end2end_timers = End2endTimer(args)
     end2end_timers.start()
     progress_bar = tqdm(
@@ -1346,21 +1374,25 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
     progress_bar.update(start_from_this_iteration - 1)
     num_trained_batches = 0
 
-    if args.manual_gc:
-        gc.disable()
-        gc.collect()
-
-
+    # Random number generator for camera ordering in retention-based offloading
     perm_generator = torch.Generator(device="cuda")
     perm_generator.manual_seed(1)
 
+    # Training state variables
     ema_loss_for_log = 0
-    means3D_all = None # A handle to means3D_all on gpu
-    send2gpu_filter = None # A handle to send2gpu_filter on gpu
-    send2gpu_filter_cpu = None # A handle to send2gpu_filter on cpu
+    means3D_all = None          # Handle to means3D on GPU (for densification)
+    send2gpu_filter = None      # Handle to send2gpu_filter on GPU
+    send2gpu_filter_cpu = None  # Handle to send2gpu_filter on CPU
+    # ============================================================================
+    # STAGE 2: MAIN TRAINING LOOP
+    # ============================================================================
     for iteration in range(
         start_from_this_iteration, opt_args.iterations + 1, args.bsz
-    ):  
+    ):
+        # ------------------------------------------------------------------------
+        # 2.1: Iteration setup and profiling
+        # ------------------------------------------------------------------------
+        # Optional: trace CUDA memory usage for debugging
         if args.trace_cuda_mem:
             if (iteration % args.log_interval) == 1 or (iteration % args.densification_interval) == 0:
                 torch.cuda.memory._record_memory_history()
@@ -1368,76 +1400,94 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
                     "[ITER {}] Tracing cuda memory usage.\n".format(iteration)
                 )
         
-        # Step Initialization
+        # Update progress bar and iteration state
         if iteration // args.bsz % 30 == 0:
             progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}"})
         progress_bar.update(args.bsz)
         utils.set_cur_iter(iteration)
-        gaussians.update_learning_rate(iteration)
+        gaussians.update_learning_rate(iteration)  # Learning rate scheduling
         num_trained_batches += 1
-        # utils.gaussian_report(gaussians)
-        # utils.memory_report("at the beginning of an iteration")
         
-        # Reset max memory tracking stats
+        # Optional: reset memory tracking for per-iteration profiling
         if args.reset_each_iter:
             torch.cuda.reset_max_memory_cached()
             torch.cuda.reset_peak_memory_stats()
             torch.cuda.reset_max_memory_allocated()
         
+        # Start timing this iteration
         timers.clear()
         timers.start("[iteration end2end]")
+        
+        # Optional: NSight Systems profiling
         if args.nsys_profile:
-            # assert args.bsz == 1, "nsys profiling only supports batch size 1"
             if iteration == args.nsys_profile_start_iter:
                 torch.cuda.cudart().cudaProfilerStart()
             if iteration == args.nsys_profile_end_iter or iteration == opt_args.iterations:
                 torch.cuda.cudart().cudaProfilerStop()
             if iteration >= args.nsys_profile_start_iter and iteration < args.nsys_profile_end_iter:
                 nvtx.range_push(f"iteration[{iteration},{iteration+args.bsz})")
-        # Every 1000 its we increase the levels of SH up to a maximum degree
+        
+        # Gradually increase spherical harmonics degree (every 1000 iterations)
         if utils.check_update_at_this_iter(iteration, args.bsz, 1000, 0):
             gaussians.oneupSHdegree()
 
-        # Prepare data: Pick random Cameras for training
+        # ------------------------------------------------------------------------
+        # 2.2: Load training data (camera images)
+        # ------------------------------------------------------------------------
         timers.start("dataloader: load the next image from disk and decode")
         try:
             batched_cameras = next(dataloader_iter)
         except StopIteration:
+            # Reached end of dataset, restart from beginning
             dataloader_iter = iter(dataloader)
             batched_cameras = next(dataloader_iter)
         timers.stop("dataloader: load the next image from disk and decode")
         
-        #TODO: `camera.uid` should be the id within a batch. Currently we use a postfix as workaround.
+        # Assign unique IDs within the batch (for tracking)
+        # TODO: camera.uid should be the id within a batch. Currently we use a postfix as workaround.
         for uid, c in enumerate(batched_cameras):
             c.uid = uid
         
-        # Send matrices to gpu
+        # ------------------------------------------------------------------------
+        # 2.3: Transfer camera matrices to GPU
+        # ------------------------------------------------------------------------
         timers.start("send cam matrices to gpu")
+        # Transfer world-view and projection transforms
         for camera in batched_cameras:
             camera.world_view_transform = camera.world_view_transform.cuda()
-            # camera.projection_matrix = camera.projection_matrix.cuda()
             camera.full_proj_transform = camera.full_proj_transform.cuda()
 
+        # Create camera intrinsics (K matrix) and compute camera-to-world transforms
         batched_world_view_transform = []
         for camera in batched_cameras:
             camera.K = camera.create_k_on_gpu()
             batched_world_view_transform.append(camera.world_view_transform.transpose(0, 1))
+        
+        # Batch process: compute inverse transforms for all cameras
         batched_world_view_transform = torch.stack(batched_world_view_transform)
         batched_world_view_transform_inverse = torch.inverse(batched_world_view_transform)
         batched_world_view_transform_inverse = torch.unbind(batched_world_view_transform_inverse, dim=0)
+        
+        # Store camera-to-world transforms (for view direction computation)
         for camera, wvt in zip(batched_cameras, batched_world_view_transform_inverse):
             camera.camtoworlds = wvt.unsqueeze(0)
-        # TODO: maybe we can save them on gpu during initialization. After all, they do not take up lots of memory.
+        # TODO: maybe we can save them on GPU during initialization. After all, they do not take up lots of memory.
         timers.stop("send cam matrices to gpu")
             
-
+        # ------------------------------------------------------------------------
+        # 2.4: Load ground-truth images to GPU
+        # ------------------------------------------------------------------------
         with torch.no_grad():
-            # Load ground-truth images to GPU
             timers.start("load_cameras")
             for camera in batched_cameras:
                 camera.original_image = camera.original_image_backup.cuda()
             timers.stop("load_cameras")
+        # ------------------------------------------------------------------------
+        # 2.5: Forward/Backward Pass - Choose offloading strategy
+        # ------------------------------------------------------------------------
         if args.braindeath_offload:
+            # BASELINE: Simple bulk parameter transfer strategy
+            # Load all params → process all cameras → offload all gradients
             N = gaussians._xyz.shape[0]
 
             losses, visibility = fairBraindead_offload_impl(
@@ -1449,18 +1499,22 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
             )
             batched_screenspace_pkg = {}
 
-            # Sync losses in the batch
+            # Aggregate and log losses
             timers.start("sync_loss_and_log")
             batched_losses = torch.stack(losses)
             batched_loss_cpu = batched_losses.cpu().numpy()
+            
+            # Exponential moving average for smoother loss tracking
             ema_loss_for_log = (
                 batched_loss_cpu.mean()
                 if ema_loss_for_log is None
                 else 0.6 * ema_loss_for_log + 0.4 * batched_loss_cpu.mean()
             )
-            # Update Epoch Statistics
+            
+            # Update dataset statistics (for adaptive sampling)
             train_dataset.update_losses(batched_loss_cpu)
-            # Logging
+            
+            # Log iteration results
             batched_loss_cpu = [round(loss, 6) for loss in batched_loss_cpu]
             log_string = "iteration[{},{}), loss: {} image: {}\n".format(
                 iteration,
@@ -1471,6 +1525,8 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
             log_file.write(log_string)
 
         elif args.pipelined_offload:
+            # OPTIMIZED: Retention-based parameter offloading with overlapped comm/compute
+            # Selective loading → retention across cameras → concurrent CPU Adam
             assert args.offload, "Pipelined offload requires offloading"
             assert args.bsz > 1, "Pipelined offload requires batch size > 1"
             assert args.gpu_cache == "xyzosr", "Pipelined offload requires xyzosr cache"
@@ -1489,26 +1545,31 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
             )
 
             batched_screenspace_pkg = {}
+            # Reorder cameras to match the optimized processing order
             batched_cameras = [batched_cameras[i] for i in ordered_cams]
             
-            # Sync losses in the batch
+            # Aggregate and log losses
             timers.start("sync_loss_and_log")
             batched_losses = torch.stack(losses)
             batched_loss_cpu = batched_losses.cpu().numpy()
+            
+            # Exponential moving average for smoother loss tracking
             ema_loss_for_log = (
                 batched_loss_cpu.mean()
                 if ema_loss_for_log is None
                 else 0.6 * ema_loss_for_log + 0.4 * batched_loss_cpu.mean()
             )
-            # Update Epoch Statistics
+            
+            # Update dataset statistics (for adaptive sampling)
             train_dataset.update_losses(batched_loss_cpu)
-            # Logging
+            
+            # Log iteration results (including sparsity metric)
             batched_loss_cpu = [round(loss, 6) for loss in batched_loss_cpu]
             log_string = "iteration[{},{}), loss: {} sparsity: {} image: {}\n".format(
                 iteration,
                 iteration + args.bsz,
                 batched_loss_cpu,
-                sparsity,
+                sparsity,  # Measures parameter reuse efficiency
                 [viewpoint_cam.image_name for viewpoint_cam in batched_cameras],
             )
             log_file.write(log_string)
@@ -1517,7 +1578,9 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
             raise ValueError("Accumulate grads is not supported")
 
         with torch.no_grad():
-            # Evaluation
+            # ------------------------------------------------------------------------
+            # 2.6: Periodic evaluation on validation set
+            # ------------------------------------------------------------------------
             end2end_timers.stop()
             training_report(
                 iteration,
@@ -1530,31 +1593,36 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
             )
             end2end_timers.start()
 
-            # Densification
-            # utils.memory_report("before densification")
+            # ------------------------------------------------------------------------
+            # 2.7: Adaptive densification (add/split/prune gaussians)
+            # ------------------------------------------------------------------------
             if args.offload:
+                # Update densification statistics based on this iteration's results
                 gsplat_densification(
                     iteration, scene, gaussians, batched_screenspace_pkg, offload=args.offload, densify_only=True
                 )
             else:  
                 raise ValueError("Invalid offload value")
+            
+            # Perform actual densification at specified intervals
             if not args.disable_auto_densification and iteration <= args.densify_until_iter and iteration > args.densify_from_iter and utils.check_update_at_this_iter(
                 iteration, args.bsz, args.densification_interval, 0
             ):
+                # Invalidate cached data (gaussians may be added/removed)
                 means3D_all = None
                 send2gpu_filter = None
                 send2gpu_filter_cpu = None
-                    
-
-            # utils.memory_report("after densification and before freeing activation states")
             
-            # Free activation states
+            # ------------------------------------------------------------------------
+            # 2.8: Free temporary activation states
+            # ------------------------------------------------------------------------
             batched_screenspace_pkg = None
             batched_image = None
             batched_compute_locally = None
-            # utils.memory_report("after freeing activation states and before saving gaussians")
 
-            # Save Gaussians
+            # ------------------------------------------------------------------------
+            # 2.9: Save trained gaussians (if at save iteration)
+            # ------------------------------------------------------------------------
             if any(
                 [
                     iteration <= save_iteration < iteration + args.bsz
@@ -1568,17 +1636,20 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
                 if not args.do_not_save:
                     utils.print_rank_0("\n[ITER {}] Saving Gaussians".format(iteration))
                     log_file.write("[ITER {}] Saving Gaussians\n".format(iteration))
+                    
                     if args.save_tensors:
+                        # Save as PyTorch tensors (.pt format) for faster loading
                         utils.print_rank_0("NOTE: Saving model as .pt files instead of .ply file.")
                         scene.save_tensors(iteration)
                     else:
+                        # Save as PLY point cloud (standard format)
                         scene.save(iteration)
 
-
                 end2end_timers.start()
-                # utils.memory_report("after densification")
 
-            # Save Checkpoints
+            # ------------------------------------------------------------------------
+            # 2.10: Save training checkpoint (for resuming)
+            # ------------------------------------------------------------------------
             if any(
                 [
                     iteration <= checkpoint_iteration < iteration + args.bsz
@@ -1588,32 +1659,36 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
                 end2end_timers.stop()
                 utils.print_rank_0("\n[ITER {}] Saving Checkpoint".format(iteration))
                 log_file.write("[ITER {}] Saving Checkpoint\n".format(iteration))
+                
                 save_folder = scene.model_path + "/checkpoints/" + str(iteration) + "/"
                 os.makedirs(save_folder, exist_ok=True)
                 torch.save(
-                    (gaussians.capture(), iteration + args.bsz),
-                    save_folder
-                    + "/chkpnt.pth"
+                    (gaussians.capture(), iteration + args.bsz),  # Model state + iteration number
+                    save_folder + "/chkpnt.pth"
                 )
                 end2end_timers.start()
 
-            # Optimizer step
+            # ------------------------------------------------------------------------
+            # 2.11: Optimizer step (for non-overlapped strategies only)
+            # ------------------------------------------------------------------------
+            # Note: For pipelined_offload and braindeath_offload, optimizer step
+            # is performed inside their respective implementations
             if iteration < opt_args.iterations and not args.pipelined_offload and not args.braindeath_offload:
-                # utils.memory_report("before optimizer step")
                 timers.start("optimizer_step")
 
+                # Scale gradients by batch size (unless using gradient accumulation mode)
                 torch.cuda.nvtx.range_push("scale grad")
-                if (
-                    args.lr_scale_mode != "accumu"
-                ):  # we scale the learning rate rather than accumulate the gradients.
+                if args.lr_scale_mode != "accumu":
                     for param in gaussians.all_parameters():
                         if param.grad is not None:
                             param.grad /= args.bsz
                 torch.cuda.nvtx.range_pop()
 
+                # Apply optimizer update
                 if not args.stop_update_param:
                     torch.cuda.nvtx.range_push("optimizer step")
                     if args.sparse_adam:
+                        # Sparse Adam: only update parameters that received gradients
                         if args.braindeath_offload:
                             sparse_indices = torch.nonzero(visibility.squeeze()).flatten().to(torch.int32)
                             sparse_indices = sparse_indices.to("cpu")
@@ -1622,35 +1697,43 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
                             gaussians.optimizer.step(visibility=visibility)
                         del visibility
                     else:
+                        # Dense Adam: update all parameters
                         gaussians.optimizer.step()
                     torch.cuda.nvtx.range_pop()
+                
+                # Clear gradients for next iteration
                 torch.cuda.nvtx.range_push("zero_grad")
                 gaussians.optimizer.zero_grad(set_to_none=True)
                 torch.cuda.nvtx.range_pop()
                 timers.stop("optimizer_step")
                 utils.check_initial_gpu_memory_usage("after optimizer step")
-                # utils.memory_report("after optimizer step")
                 
+                # Clear gradient buffer for offloading strategies
                 if args.offload and not args.braindeath_offload:
                     timers.start("zero out grads")
                     gaussians.parameters_grad_buffer[:N, :].zero_()
                     timers.stop("zero out grads")
-                    
 
-        # Finish a batch and clean up
-        torch.cuda.synchronize()
-        for (
-            viewpoint_cam
-        ) in batched_cameras:  # Release memory of locally rendered original_image
+        # ------------------------------------------------------------------------
+        # 2.12: Iteration cleanup
+        # ------------------------------------------------------------------------
+        torch.cuda.synchronize()  # Ensure all GPU operations are complete
+        
+        # Release camera image memory
+        for viewpoint_cam in batched_cameras:
             viewpoint_cam.original_image = None
+        
+        # End profiling range if active
         if args.nsys_profile:
             if iteration >= args.nsys_profile_start_iter and iteration < args.nsys_profile_end_iter:
                 nvtx.range_pop()
+        
+        # Print timing statistics
         if utils.check_enable_python_timer():
             timers.stop("[iteration end2end]")
             timers.printTimers(iteration, mode="sum")
-            if args.manual_gc:
-                gc.collect()
+        
+        # Dump CUDA memory trace if enabled
         if args.trace_cuda_mem:
             if (iteration % args.log_interval) == 1 or (iteration % args.densification_interval) == 0:
                 dump_name = args.model_path + f"/trace_dump/iter={iteration}"
@@ -1659,29 +1742,36 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
             
         utils.memory_report("at the end of the iteration")
         log_file.flush()
-        
-        # gc.collect()
-        # Dump the garbage collection statistics to a JSON file
-        # gc_stats = gc.get_stats()
-        # with open('gc_stats.json', 'a') as file:
-        #     json.dump(gc_stats, file, indent=4)
 
-    # Finish training
+    # ============================================================================
+    # STAGE 3: POST-TRAINING CLEANUP AND REPORTING
+    # ============================================================================
+    
+    # Clean up CUDA resources
     del comm_stream
+    
+    # Print final timing statistics
     if opt_args.iterations not in args.save_iterations:
         end2end_timers.print_time(log_file, opt_args.iterations)
+    
+    # Log peak memory usage
     log_file.write(
         "Max Memory usage: {} GB.\n".format(
             torch.cuda.max_memory_allocated() / 1024 / 1024 / 1024
         )
     )
+    
+    # Close progress bar and clean up scene
     progress_bar.close()
     scene.clean_up()
     
+    # Stop profiler if active
     if args.nsys_profile:
         torch.cuda.cudart().cudaProfilerStop()
     
+    # Log CPU Adam trailing overhead statistics (if measured)
     if args.log_cpu_adam_trailing_overhead:
+        # Calculate average overhead (excluding first 3 warmup iterations)
         average_cpu_adam_trailing_from_default_stream = (
             args.cpu_adam_trailing_overhead["from_default_stream"] / (args.cpu_adam_trailing_overhead["step"] - 3)
         )
@@ -1689,13 +1779,13 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
             args.cpu_adam_trailing_overhead["from_comm_stream"] / (args.cpu_adam_trailing_overhead["step"] - 3)
         )
 
+        # Trailing overhead: time spent waiting for CPU Adam to finish after GPU is done
         log_file.write(
             "CPU Adam trailing [from default stream]: {} ms.\n".format(average_cpu_adam_trailing_from_default_stream)
         )
         log_file.write(
             "CPU Adam trailing [from comm stream]: {} ms.\n".format(average_cpu_adam_trailing_from_comm_stream)
         )
-        # print("CPU Adam trailing overhead: {} ms.".format(average_cpu_adam_trailing_overhead))
 
 
 
