@@ -4,7 +4,7 @@ import json
 from utils.loss_utils import l1_loss
 from torch.cuda import nvtx
 from torch.utils.data import DataLoader
-from scene import Scene, GaussianModel, SceneDataset, TorchSceneDataset, custom_collate_fn
+from scene import Scene, GaussianModel, SceneDataset, OffloadSceneDataset
 from utils.general_utils import prepare_output_and_logger
 import utils.general_utils as utils
 from utils.timer import Timer, End2endTimer
@@ -13,7 +13,6 @@ from utils.image_utils import psnr
 from densification import (
     gsplat_densification, 
     update_densification_stats_pipelineoffload_xyzosr,
-    update_densification_stats_baseline_accumGrads,
 )
 from clm_kernels import (
     send_shs2gpu_stream,
@@ -24,7 +23,6 @@ from clm_kernels import (
 )
 import clm_kernels
 import torch.multiprocessing
-import gc
 import math
 from gsplat import (
     rasterization,
@@ -1107,10 +1105,7 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
     gaussians = GaussianModel(sh_degree=dataset_args.sh_degree)
 
     with torch.no_grad():
-        if args.torch_dataloader:
-            scene = Scene(args, gaussians)
-        else:
-            scene = Scene(args, gaussians)
+        scene = Scene(args, gaussians)
         gaussians.training_setup(opt_args)
 
         if args.start_checkpoint != "":
@@ -1127,33 +1122,18 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
     utils.check_initial_gpu_memory_usage("after init and before training loop")
 
     # Init dataset
-    if args.torch_dataloader:
-        train_dataset = TorchSceneDataset(scene.getTrainCameras(), scene.getTrainCamerasInfo())
-        if args.num_workers == 0:
-            dataloader = DataLoader(
-                train_dataset,
-                batch_size=args.bsz,
-                shuffle=True,
-                drop_last=True,
-                pin_memory=True,
-                collate_fn=custom_collate_fn
-            )
-        elif args.num_workers > 0:
-            dataloader = DataLoader(
-                train_dataset,
-                batch_size=args.bsz,
-                num_workers=args.num_workers,
-                shuffle=True,
-                drop_last=True,
-                persistent_workers=True,
-                pin_memory=True,
-                collate_fn=custom_collate_fn
-            )
-        else:
-            assert False, "`num_workers` should be a positive number"
-        dataloader_iter = iter(dataloader)
-    else:
-        train_dataset = SceneDataset(scene.getTrainCameras(), scene.getTrainCamerasInfo())
+    train_dataset = OffloadSceneDataset(scene.getTrainCamerasInfo())
+    dataloader = DataLoader(
+        train_dataset,
+        batch_size=args.bsz,
+        num_workers=1, # use one worker by default
+        shuffle=True,
+        drop_last=True,
+        persistent_workers=True,
+        pin_memory=True,
+        collate_fn=(lambda batch: batch)
+    )
+    dataloader_iter = iter(dataloader)
 
     # Init background
     background = None
@@ -1228,57 +1208,37 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
             gaussians.oneupSHdegree()
 
         # Prepare data: Pick random Cameras for training
-        if args.torch_dataloader:
-            timers.start("dataloader: load the next image from disk and decode")
-            try:
-                batched_cameras = next(dataloader_iter)
-            except StopIteration:
-                dataloader_iter = iter(dataloader)
-                batched_cameras = next(dataloader_iter)
-            timers.stop("dataloader: load the next image from disk and decode")
-            
-            #TODO: `camera.uid` should be the id within a batch. Currently we use a postfix as workaround.
-            for uid, c in enumerate(batched_cameras):
-                c.uid = uid
-            
-            # Send matrices to gpu
-            timers.start("send cam matrices to gpu")
-            for camera in batched_cameras:
-                camera.world_view_transform = camera.world_view_transform.cuda()
-                # camera.projection_matrix = camera.projection_matrix.cuda()
-                camera.full_proj_transform = camera.full_proj_transform.cuda()
+        timers.start("dataloader: load the next image from disk and decode")
+        try:
+            batched_cameras = next(dataloader_iter)
+        except StopIteration:
+            dataloader_iter = iter(dataloader)
+            batched_cameras = next(dataloader_iter)
+        timers.stop("dataloader: load the next image from disk and decode")
+        
+        #TODO: `camera.uid` should be the id within a batch. Currently we use a postfix as workaround.
+        for uid, c in enumerate(batched_cameras):
+            c.uid = uid
+        
+        # Send matrices to gpu
+        timers.start("send cam matrices to gpu")
+        for camera in batched_cameras:
+            camera.world_view_transform = camera.world_view_transform.cuda()
+            # camera.projection_matrix = camera.projection_matrix.cuda()
+            camera.full_proj_transform = camera.full_proj_transform.cuda()
 
-            if args.pipelined_offload or args.braindeath_offload:
-                batched_world_view_transform = []
-                for camera in batched_cameras:
-                    camera.K = camera.create_k_on_gpu()
-                    batched_world_view_transform.append(camera.world_view_transform.transpose(0, 1))
-                batched_world_view_transform = torch.stack(batched_world_view_transform)
-                batched_world_view_transform_inverse = torch.inverse(batched_world_view_transform)
-                batched_world_view_transform_inverse = torch.unbind(batched_world_view_transform_inverse, dim=0)
-                for camera, wvt in zip(batched_cameras, batched_world_view_transform_inverse):
-                    camera.camtoworlds = wvt.unsqueeze(0)
-                # TODO: maybe we can save them on gpu during initialization. After all, they do not take up lots of memory.
-            timers.stop("send cam matrices to gpu")
+        batched_world_view_transform = []
+        for camera in batched_cameras:
+            camera.K = camera.create_k_on_gpu()
+            batched_world_view_transform.append(camera.world_view_transform.transpose(0, 1))
+        batched_world_view_transform = torch.stack(batched_world_view_transform)
+        batched_world_view_transform_inverse = torch.inverse(batched_world_view_transform)
+        batched_world_view_transform_inverse = torch.unbind(batched_world_view_transform_inverse, dim=0)
+        for camera, wvt in zip(batched_cameras, batched_world_view_transform_inverse):
+            camera.camtoworlds = wvt.unsqueeze(0)
+        # TODO: maybe we can save them on gpu during initialization. After all, they do not take up lots of memory.
+        timers.stop("send cam matrices to gpu")
             
-        else:
-            batched_cameras = train_dataset.get_batched_cameras(args.bsz)
-
-            if args.pipelined_offload or args.braindeath_offload:
-                for camera in batched_cameras:
-                    camera.world_view_transform = camera.world_view_transform.cuda()
-                    # camera.projection_matrix = camera.projection_matrix.cuda()
-                    camera.full_proj_transform = camera.full_proj_transform.cuda()
-
-                batched_world_view_transform = []
-                for camera in batched_cameras:
-                    camera.K = camera.create_k_on_gpu()
-                    batched_world_view_transform.append(camera.world_view_transform.transpose(0, 1))
-                batched_world_view_transform = torch.stack(batched_world_view_transform)
-                batched_world_view_transform_inverse = torch.inverse(batched_world_view_transform)
-                batched_world_view_transform_inverse = torch.unbind(batched_world_view_transform_inverse, dim=0)
-                for camera, wvt in zip(batched_cameras, batched_world_view_transform_inverse):
-                    camera.camtoworlds = wvt.unsqueeze(0)
 
         with torch.no_grad():
             # Load ground-truth images to GPU
@@ -1580,186 +1540,104 @@ def training_report(
 
         # init workload division strategy
         for config in validation_configs:
-            if config["cameras"] and len(config["cameras"]) > 0:
-                l1_test = torch.scalar_tensor(0.0, device="cuda")
-                psnr_test = torch.scalar_tensor(0.0, device="cuda")
+            # Dataset is offloaded to disk
+            l1_test = torch.scalar_tensor(0.0, device="cuda")
+            psnr_test = torch.scalar_tensor(0.0, device="cuda")
 
-                # TODO: if not divisible by world size
-                num_cameras = config["num_cameras"]
-                eval_dataset = SceneDataset(config["cameras"])
-                for idx in range(1, num_cameras + 1, 1):
-                    num_camera_to_load = min(1, num_cameras - idx + 1)
-                    batched_cameras = eval_dataset.get_batched_cameras(
-                        num_camera_to_load
-                    )
-                    # Load ground-truth images to GPU
-                    for camera in batched_cameras:
-                        camera.original_image = camera.original_image_backup.cuda()
-                    
-                    batched_image = []
-                    for cam_id, camera in enumerate(batched_cameras):
-                        #FIXME: quick workaround for verifying the correctness
-                        camera.world_view_transform = camera.world_view_transform.cuda()
-                        camera.full_proj_transform = camera.full_proj_transform.cuda()
-                        camera.K = camera.create_k_on_gpu()
-                        camera.camtoworlds = torch.inverse(camera.world_view_transform.transpose(0, 1)).unsqueeze(0)
-
-                        if args.braindeath_offload:
-                            assert args.offload
-
-                            rendered_image = braindead_offload_eval_one_cam(
-                                camera=camera,
-                                gaussians=scene.gaussians,
-                                background=background,
-                                scene=scene
-                            )
-                            batched_image.append(rendered_image)
-                        
-                        elif args.offload:
-                            assert args.gpu_cache == "xyzosr"
-                            rendered_image = offload_eval_one_cam(
-                                camera=camera,
-                                gaussians=scene.gaussians,
-                                background=background,
-                                scene=scene
-                            )
-                            batched_image.append(rendered_image)
-                            
-                        else:
-                            raise ValueError("Invalid offload value")
-                            
-                        
-                    for camera_id, (image, gt_camera) in enumerate(
-                        zip(batched_image, batched_cameras)
-                    ):
-                        if (
-                            image is None or len(image.shape) == 0
-                        ):  # The image is not rendered locally.
-                            image = torch.zeros(
-                                gt_camera.original_image.shape,
-                                device="cuda",
-                                dtype=torch.float32,
-                            )
-
-                        image = torch.clamp(image, 0.0, 1.0)
-                        gt_image = torch.clamp(
-                            gt_camera.original_image / 255.0, 0.0, 1.0
-                        )
-
-                        if idx + camera_id < num_cameras + 1:
-                            l1_test += l1_loss(image, gt_image).mean().double()
-                            psnr_test += psnr(image, gt_image).mean().double()
-                        gt_camera.original_image = None
-                psnr_test /= num_cameras
-                l1_test /= num_cameras
-                utils.print_rank_0(
-                    "\n[ITER {}] Evaluating {}: L1 {} PSNR {}".format(
-                        iteration, config["name"], l1_test, psnr_test
-                    )
-                )
-                log_file.write(
-                    "[ITER {}] Evaluating {}: L1 {} PSNR {}\n".format(
-                        iteration, config["name"], l1_test, psnr_test
-                    )
-                )
-            elif config["cameras_info"] and len(config["cameras_info"]) > 0:
-                # Dataset is offloaded to disk
-                l1_test = torch.scalar_tensor(0.0, device="cuda")
-                psnr_test = torch.scalar_tensor(0.0, device="cuda")
-
-                # TODO: if not divisible by world size
-                num_cameras = config["num_cameras"]
-                eval_dataset = TorchSceneDataset(config["cameras"], config["cameras_info"])
-                # Init dataloader: num_workers = 0
-                dataloader = DataLoader(
-                    eval_dataset,
-                    batch_size=1,
-                    # shuffle=True,
-                    pin_memory=True,
-                    collate_fn=custom_collate_fn
-                )
-                dataloader_iter = iter(dataloader)
+            # TODO: if not divisible by world size
+            num_cameras = config["num_cameras"]
+            eval_dataset = OffloadSceneDataset(config["cameras_info"])
+            # Init dataloader: num_workers = 0
+            dataloader = DataLoader(
+                eval_dataset,
+                batch_size=1,
+                # shuffle=True,
+                pin_memory=True,
+                collate_fn=(lambda batch: batch)
+            )
+            dataloader_iter = iter(dataloader)
+            
+            for idx in range(1, num_cameras + 1, 1):
+                num_camera_to_load = min(1, num_cameras - idx + 1)
+                #FIXME: may have problems when bsz > 1
+                try:
+                    batched_cameras = next(dataloader_iter)
+                except StopIteration:
+                    dataloader_iter = iter(dataloader)
+                    batched_cameras = next(dataloader_iter)
+                # batched_cameras = eval_dataset.get_batched_cameras(
+                #     num_camera_to_load
+                # )
+                # Load ground-truth images to GPU
+                for camera in batched_cameras:
+                    camera.original_image = camera.original_image_backup.cuda()
                 
-                for idx in range(1, num_cameras + 1, 1):
-                    num_camera_to_load = min(1, num_cameras - idx + 1)
-                    #FIXME: may have problems when bsz > 1
-                    try:
-                        batched_cameras = next(dataloader_iter)
-                    except StopIteration:
-                        dataloader_iter = iter(dataloader)
-                        batched_cameras = next(dataloader_iter)
-                    # batched_cameras = eval_dataset.get_batched_cameras(
-                    #     num_camera_to_load
-                    # )
-                    # Load ground-truth images to GPU
-                    for camera in batched_cameras:
-                        camera.original_image = camera.original_image_backup.cuda()
+                batched_image = []
+                for cam_id, camera in enumerate(batched_cameras):
+                    #FIXME: quick workaround for verifying the correctness
+                    camera.world_view_transform = camera.world_view_transform.cuda()
+                    camera.full_proj_transform = camera.full_proj_transform.cuda()
+                    camera.K = camera.create_k_on_gpu()
+                    camera.camtoworlds = torch.inverse(camera.world_view_transform.transpose(0, 1)).unsqueeze(0)
+
+                    if args.braindeath_offload:
+                        assert args.offload
+
+                        rendered_image = braindead_offload_eval_one_cam(
+                            camera=camera,
+                            gaussians=scene.gaussians,
+                            background=background,
+                            scene=scene
+                        )
+                        batched_image.append(rendered_image)
                     
-                    batched_image = []
-                    for cam_id, camera in enumerate(batched_cameras):
-                        #FIXME: quick workaround for verifying the correctness
-                        camera.world_view_transform = camera.world_view_transform.cuda()
-                        camera.full_proj_transform = camera.full_proj_transform.cuda()
-                        camera.K = camera.create_k_on_gpu()
-                        camera.camtoworlds = torch.inverse(camera.world_view_transform.transpose(0, 1)).unsqueeze(0)
-
-                        if args.braindeath_offload:
-                            assert args.offload
-
-                            rendered_image = braindead_offload_eval_one_cam(
-                                camera=camera,
-                                gaussians=scene.gaussians,
-                                background=background,
-                                scene=scene
-                            )
-                            batched_image.append(rendered_image)
-                        
-                        elif args.offload:
-                            assert args.gpu_cache == "xyzosr"
-                            rendered_image = offload_eval_one_cam(
-                                camera=camera,
-                                gaussians=scene.gaussians,
-                                background=background,
-                                scene=scene
-                            )
-                            batched_image.append(rendered_image)
-                        else:
-                            raise ValueError("Invalid offload value")
+                    elif args.offload:
+                        assert args.gpu_cache == "xyzosr"
+                        rendered_image = offload_eval_one_cam(
+                            camera=camera,
+                            gaussians=scene.gaussians,
+                            background=background,
+                            scene=scene
+                        )
+                        batched_image.append(rendered_image)
+                    else:
+                        raise ValueError("Invalid offload value")
 
 
-                    for camera_id, (image, gt_camera) in enumerate(
-                        zip(batched_image, batched_cameras)
-                    ):
-                        if (
-                            image is None or len(image.shape) == 0
-                        ):  # The image is not rendered locally.
-                            image = torch.zeros(
-                                gt_camera.original_image.shape,
-                                device="cuda",
-                                dtype=torch.float32,
-                            )
-
-                        image = torch.clamp(image, 0.0, 1.0)
-                        gt_image = torch.clamp(
-                            gt_camera.original_image / 255.0, 0.0, 1.0
+                for camera_id, (image, gt_camera) in enumerate(
+                    zip(batched_image, batched_cameras)
+                ):
+                    if (
+                        image is None or len(image.shape) == 0
+                    ):  # The image is not rendered locally.
+                        image = torch.zeros(
+                            gt_camera.original_image.shape,
+                            device="cuda",
+                            dtype=torch.float32,
                         )
 
-                        if idx + camera_id < num_cameras + 1:
-                            l1_test += l1_loss(image, gt_image).mean().double()
-                            psnr_test += psnr(image, gt_image).mean().double()
-                        gt_camera.original_image = None
-                psnr_test /= num_cameras
-                l1_test /= num_cameras
-                utils.print_rank_0(
-                    "\n[ITER {}] Evaluating {}: L1 {} PSNR {}".format(
-                        iteration, config["name"], l1_test, psnr_test
+                    image = torch.clamp(image, 0.0, 1.0)
+                    gt_image = torch.clamp(
+                        gt_camera.original_image / 255.0, 0.0, 1.0
                     )
+
+                    if idx + camera_id < num_cameras + 1:
+                        l1_test += l1_loss(image, gt_image).mean().double()
+                        psnr_test += psnr(image, gt_image).mean().double()
+                    gt_camera.original_image = None
+            
+            psnr_test /= num_cameras
+            l1_test /= num_cameras
+            utils.print_rank_0(
+                "\n[ITER {}] Evaluating {}: L1 {} PSNR {}".format(
+                    iteration, config["name"], l1_test, psnr_test
                 )
-                log_file.write(
-                    "[ITER {}] Evaluating {}: L1 {} PSNR {}\n".format(
-                        iteration, config["name"], l1_test, psnr_test
-                    )
+            )
+            log_file.write(
+                "[ITER {}] Evaluating {}: L1 {} PSNR {}\n".format(
+                    iteration, config["name"], l1_test, psnr_test
                 )
+            )
                 
 
         torch.cuda.empty_cache()

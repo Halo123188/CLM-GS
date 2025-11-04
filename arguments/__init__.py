@@ -82,9 +82,6 @@ class AuxiliaryParams(ParamGroup):
         self.grid_size_D = 32
         self.prealloc_capacity = 5_000_000
         self.fused_loss = "advanced_fuse" # "default", "hand_written", "torch_compile", "advanced_fuse"s
-        self.torch_dataloader = False
-        self.decode_dataset_to_disk = False
-        self.reuse_decoded_dataset = False
         self.decode_dataset_path = "/tmp"
         self.num_workers = 0
         self.sharing_strategy = "default" # "default" ("file_descriptor"), or "file_system" [see https://pytorch.org/docs/stable/multiprocessing.html#sharing-strategies]

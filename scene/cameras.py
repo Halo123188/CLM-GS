@@ -45,7 +45,7 @@ class Camera(nn.Module):
         uid,
         trans=np.array([0.0, 0.0, 0.0]),
         scale=1.0,
-        torch_dataloader=False,
+        offload=False,
     ):
         super(Camera, self).__init__()
 
@@ -56,7 +56,7 @@ class Camera(nn.Module):
         self.FoVx = FoVx
         self.FoVy = FoVy
         self.image_name = image_name
-        self.device = "cpu" if torch_dataloader else "cuda"
+        self.device = "cpu" if offload else "cuda"
 
         args = get_args()
         log_file = get_log_file()

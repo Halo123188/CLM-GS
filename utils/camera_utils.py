@@ -67,7 +67,6 @@ def loadCam(args, id, cam_info, decompressed_image=None, return_image=False):
         gt_alpha_mask=loaded_mask,
         image_name=cam_info.image_name,
         uid=id,
-        torch_dataloader=args.torch_dataloader,
     )
 
 def loadCam_raw_from_disk(args, id, cam_info, to_gpu=False):
@@ -100,7 +99,7 @@ def loadCam_raw_from_disk(args, id, cam_info, to_gpu=False):
         gt_alpha_mask=None,
         image_name=cam_info.image_name,
         uid=id,
-        torch_dataloader=args.torch_dataloader,
+        offload=True,
     )
 
 def load_decompressed_image(params):
