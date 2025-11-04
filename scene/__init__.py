@@ -256,10 +256,11 @@ class Scene:
         log_file.write("rotation shape: {}\n".format(self.gaussians._rotation.shape))
 
     def clean_up(self):
+        pass
         # Remove the predecoded dataset from disk
-        if self.args.decode_dataset_to_disk and not self.args.reuse_decoded_dataset:
-            clean_up_disk(self.args)
-            utils.print_rank_0("Cleaned up decoded dataset on disk.")
+        # if self.args.decode_dataset_to_disk and not self.args.reuse_decoded_dataset:
+        #     clean_up_disk(self.args)
+        #     utils.print_rank_0("Cleaned up decoded dataset on disk.")
 
 class SceneDataset:
     def __init__(self, cameras, cameras_info=None):

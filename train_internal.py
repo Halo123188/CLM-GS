@@ -1065,18 +1065,19 @@ def fairBraindead_offload_impl(
         loss.backward()
         losses.append(loss.detach())
 
-        # Note: Densification stats update is commented out in this baseline version
         # with torch.no_grad():
-            # Update densification state.
-            #  update_densification_stats_pipelineoffload_xyzosr(
-            #     scene,
-            #     gaussians,
-            #     int(utils.get_img_height()),
-            #     int(utils.get_img_width()),
-            #     torch.nonzero((radiis > 0)).flatten(),
-            #     means2D.grad.squeeze(0),
-            #     radiis.squeeze(0),
-            # )
+        #     # Update densification state.
+        #     # import pdb; pdb.set_trace()
+        #     update_densification_stats_pipelineoffload_xyzosr(
+        #         scene,
+        #         gaussians,
+        #         int(utils.get_img_height()),
+        #         int(utils.get_img_width()),
+        #         # torch.nonzero((radiis > 0)).flatten(),
+        #         this_filter,
+        #         means2D.grad.squeeze(0),
+        #         radiis.squeeze(0),
+        #     )
         
         # ------------------------------------------------------------------------
         # 3.4: Accumulate gradients back to full-size buffers
@@ -1599,7 +1600,7 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
             if args.offload:
                 # Update densification statistics based on this iteration's results
                 gsplat_densification(
-                    iteration, scene, gaussians, batched_screenspace_pkg, offload=args.offload, densify_only=True
+                    iteration, scene, gaussians, batched_screenspace_pkg, offload=args.offload
                 )
             else:  
                 raise ValueError("Invalid offload value")
