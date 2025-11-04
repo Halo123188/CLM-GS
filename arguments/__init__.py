@@ -94,7 +94,6 @@ class AuxiliaryParams(ParamGroup):
         self.packed = False
         self.pipeline_mode = "final"
         self.fairBaseline = False
-        self.braindead_pin = True
         self.delay_cpuadam_notaccessed_gs = False
         self.reorder_by_min_sparsity_at_end = True
         super().__init__(parser, "Loading Parameters", sentinel)

@@ -849,12 +849,12 @@ def fairBraindead_offload_impl(
         torch.cuda.nvtx.range_pop()
 
     torch.cuda.nvtx.range_push("prealloc pinned memory for grads")
-    gaussians._xyz.grad = torch.empty_like(gaussians._xyz, pin_memory=args.braindead_pin)
-    gaussians._features_dc.grad = torch.empty_like(gaussians._features_dc, pin_memory=args.braindead_pin)
-    gaussians._features_rest.grad = torch.empty_like(gaussians._features_rest, pin_memory=args.braindead_pin)
-    gaussians._scaling.grad = torch.empty_like(gaussians._scaling, pin_memory=args.braindead_pin)
-    gaussians._rotation.grad = torch.empty_like(gaussians._rotation, pin_memory=args.braindead_pin)
-    gaussians._opacity.grad = torch.empty_like(gaussians._opacity, pin_memory=args.braindead_pin)  
+    gaussians._xyz.grad = torch.empty_like(gaussians._xyz, pin_memory=True)
+    gaussians._features_dc.grad = torch.empty_like(gaussians._features_dc, pin_memory=True)
+    gaussians._features_rest.grad = torch.empty_like(gaussians._features_rest, pin_memory=True)
+    gaussians._scaling.grad = torch.empty_like(gaussians._scaling, pin_memory=True)
+    gaussians._rotation.grad = torch.empty_like(gaussians._rotation, pin_memory=True)
+    gaussians._opacity.grad = torch.empty_like(gaussians._opacity, pin_memory=True)  
     torch.cuda.nvtx.range_pop()
 
     torch.cuda.nvtx.range_push("prealloc space for gpu grads")
