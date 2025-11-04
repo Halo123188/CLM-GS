@@ -922,6 +922,26 @@ def fairBraindead_offload_impl(
     background,
     sparse_adam=False
 ):
+    """
+    Simple "braindead" offload implementation for baseline comparison.
+    
+    Strategy: Load ALL parameters to GPU once, process all cameras sequentially,
+    then offload ALL gradients back to CPU. This is simpler but less memory-efficient
+    than retention-based approaches like pipeline_offload_retention_optimized_v5.
+    
+    The pipeline has 4 stages:
+    1. Setup: Load all parameters to GPU and calculate visibility filters
+    2. Initialize: Allocate gradient buffers on both CPU (pinned) and GPU
+    3. Main loop: Process each camera sequentially, accumulating gradients on GPU
+    4. Finalize: Offload all gradients to CPU and perform optimizer step
+    
+    This serves as a baseline to measure the effectiveness of more sophisticated
+    retention-based parameter offloading strategies.
+    """
+    
+    # ============================================================================
+    # STAGE 1: SETUP - LOAD PARAMETERS & CALCULATE VISIBILITY
+    # ============================================================================
     args = utils.get_args()
     timers = utils.get_timers()
     losses = []
@@ -930,22 +950,27 @@ def fairBraindead_offload_impl(
     n_gaussians = gaussians._xyz.shape[0]
 
     with torch.no_grad():
+        # Load ALL gaussian parameters from CPU to GPU at once
+        # Unlike retention-based methods, we don't selectively load parameters per camera
         torch.cuda.nvtx.range_push("load parameters to gpu")
         xyz_gpu = gaussians._xyz.detach().to("cuda")
         _opacity_gpu = gaussians._opacity.detach().to("cuda")
         _scaling_gpu = gaussians._scaling.detach().to("cuda")
         _rotation_gpu = gaussians._rotation.detach().to("cuda")
-        _features_dc_gpu = gaussians._features_dc.detach().to("cuda")
-        _features_rest_gpu = gaussians._features_rest.detach().to("cuda")
+        _features_dc_gpu = gaussians._features_dc.detach().to("cuda")      # SH DC coefficients
+        _features_rest_gpu = gaussians._features_rest.detach().to("cuda")  # SH higher-order coefficients
         sh_degree = gaussians.active_sh_degree
         torch.cuda.nvtx.range_pop()
 
+        # Apply activation functions to transform parameters to valid ranges
         torch.cuda.nvtx.range_push("activate critical attr")
-        opacity_gpu_origin = gaussians.opacity_activation(_opacity_gpu)
-        scaling_gpu_origin = gaussians.scaling_activation(_scaling_gpu)
-        rotation_gpu_origin = gaussians.rotation_activation(_rotation_gpu)
+        opacity_gpu_origin = gaussians.opacity_activation(_opacity_gpu)      # → [0, 1]
+        scaling_gpu_origin = gaussians.scaling_activation(_scaling_gpu)      # → positive values
+        rotation_gpu_origin = gaussians.rotation_activation(_rotation_gpu)   # → normalized quaternions
         torch.cuda.nvtx.range_pop()
 
+        # Calculate which gaussians are visible for each camera (frustum culling)
+        # This determines which subset of gaussians to render for each camera
         torch.cuda.nvtx.range_push("calculate_filters")
         filters, camera_ids, gaussian_ids = calculate_filters(
             batched_cameras,
@@ -953,10 +978,15 @@ def fairBraindead_offload_impl(
             opacity_gpu_origin,
             scaling_gpu_origin,
             rotation_gpu_origin
-        ) # list of GPU long tensors. len(cameras)
+        )  # Returns: list of index tensors, one per camera
         del opacity_gpu_origin, scaling_gpu_origin, rotation_gpu_origin
         torch.cuda.nvtx.range_pop()
 
+    # ============================================================================
+    # STAGE 2: INITIALIZE GRADIENT BUFFERS
+    # ============================================================================
+    # Allocate pinned memory on CPU for fast GPU→CPU transfer at the end
+    # Pinned memory enables asynchronous transfers and better bandwidth
     torch.cuda.nvtx.range_push("prealloc pinned memory for grads")
     gaussians._xyz.grad = torch.empty_like(gaussians._xyz, pin_memory=True)
     gaussians._features_dc.grad = torch.empty_like(gaussians._features_dc, pin_memory=True)
@@ -966,6 +996,8 @@ def fairBraindead_offload_impl(
     gaussians._opacity.grad = torch.empty_like(gaussians._opacity, pin_memory=True)  
     torch.cuda.nvtx.range_pop()
 
+    # Allocate gradient accumulation buffers on GPU
+    # These accumulate gradients from all cameras before bulk transfer to CPU
     torch.cuda.nvtx.range_push("prealloc space for gpu grads")
     xyz_gpu_grad = torch.zeros_like(xyz_gpu)
     _opacity_gpu_grad = torch.zeros_like(_opacity_gpu)
@@ -976,28 +1008,42 @@ def fairBraindead_offload_impl(
     torch.cuda.nvtx.range_pop()
 
     losses = []
+    # Visibility mask tracks which gaussians received gradients (for sparse Adam)
     visibility = torch.zeros((xyz_gpu.shape[0],), dtype=torch.bool, device="cuda") if sparse_adam else None
 
+    # ============================================================================
+    # STAGE 3: MAIN CAMERA PROCESSING LOOP
+    # ============================================================================
     for micro_idx, camera in enumerate(batched_cameras):
         torch.cuda.nvtx.range_push(f"micro batch {micro_idx}")
 
-        this_filter = filters[micro_idx]
+        this_filter = filters[micro_idx]  # Indices of visible gaussians for this camera
 
+        # ------------------------------------------------------------------------
+        # 3.1: Gather visible parameters for this camera
+        # ------------------------------------------------------------------------
         torch.cuda.nvtx.range_push("prepare filtered parameters")
+        
+        # Gather only the visible gaussians (reduces computation and memory)
         filtered_xyz = torch.gather(xyz_gpu, 0, this_filter.reshape(-1, 1).expand(-1, 3)).requires_grad_(True)
         _filtered_opacity = torch.gather(_opacity_gpu, 0, this_filter.reshape(-1, 1)).requires_grad_(True)
         _filtered_scaling = torch.gather(_scaling_gpu, 0, this_filter.reshape(-1, 1).expand(-1, 3)).requires_grad_(True)
         _filtered_rotation = torch.gather(_rotation_gpu, 0, this_filter.reshape(-1, 1).expand(-1, 4)).requires_grad_(True)
         
+        # Gather spherical harmonics features (3 channels for DC, 45 for higher-order terms)
         _filtered_features_dc = torch.gather(_features_dc_gpu.view(-1, 3), 0, this_filter.reshape(-1, 1).expand(-1, 3)).requires_grad_(True)
         _filtered_features_rest = torch.gather(_features_rest_gpu.view(-1, 45), 0, this_filter.reshape(-1, 1).expand(-1, 45)).requires_grad_(True)
 
+        # Apply activation functions and prepare SH features
         filtered_opacity = gaussians.opacity_activation(_filtered_opacity)
         filtered_scaling = gaussians.scaling_activation(_filtered_scaling)
         filtered_rotation = gaussians.rotation_activation(_filtered_rotation)
-        filtered_shs = torch.cat((_filtered_features_dc, _filtered_features_rest), dim=1)
+        filtered_shs = torch.cat((_filtered_features_dc, _filtered_features_rest), dim=1)  # Combine DC + rest
         torch.cuda.nvtx.range_pop()
 
+        # ------------------------------------------------------------------------
+        # 3.2: Forward pass - Render image
+        # ------------------------------------------------------------------------
         rendered_image, means2D, radiis = pipeline_forward_one_step(
             filtered_opacity,
             filtered_scaling,
@@ -1011,10 +1057,15 @@ def fairBraindead_offload_impl(
             None,
             eval=False,
         )
+        
+        # ------------------------------------------------------------------------
+        # 3.3: Backward pass - Compute loss and gradients
+        # ------------------------------------------------------------------------
         loss = torch_compiled_loss(rendered_image, camera.original_image)
         loss.backward()
         losses.append(loss.detach())
 
+        # Note: Densification stats update is commented out in this baseline version
         # with torch.no_grad():
             # Update densification state.
             #  update_densification_stats_pipelineoffload_xyzosr(
@@ -1027,8 +1078,12 @@ def fairBraindead_offload_impl(
             #     radiis.squeeze(0),
             # )
         
+        # ------------------------------------------------------------------------
+        # 3.4: Accumulate gradients back to full-size buffers
+        # ------------------------------------------------------------------------
         with torch.no_grad():
             torch.cuda.nvtx.range_push("scatter gpu grads back to buffer of origin shape")
+            # Scatter filtered gradients back to full gradient buffers (accumulation)
             xyz_gpu_grad.scatter_add_(dim=0, src=filtered_xyz.grad, index=this_filter.reshape(-1, 1).expand(-1, 3))
             _opacity_gpu_grad.scatter_add_(dim=0, src=_filtered_opacity.grad, index=this_filter.reshape(-1, 1))
             _scaling_gpu_grad.scatter_add_(dim=0, src=_filtered_scaling.grad, index=this_filter.reshape(-1, 1).expand(-1, 3))
@@ -1037,17 +1092,31 @@ def fairBraindead_offload_impl(
             _features_rest_gpu_grad.view(-1, 45).scatter_add_(dim=0, src=_filtered_features_rest.grad, index=this_filter.reshape(-1, 1).expand(-1, 45))
             torch.cuda.nvtx.range_pop()
 
+        # ------------------------------------------------------------------------
+        # 3.5: Update visibility mask (for sparse Adam)
+        # ------------------------------------------------------------------------
         if sparse_adam:
             torch.cuda.nvtx.range_push("update visibility")
+            # Mark which gaussians received gradients in this iteration
             src = torch.ones((len(filters[micro_idx]),), dtype=torch.bool, device="cuda")
             visibility.scatter_(dim=0, index=filters[micro_idx], src=src)
             del src
             torch.cuda.nvtx.range_pop()
         
+        # Cleanup temporary tensors
         del loss, rendered_image, means2D, radiis
         torch.cuda.nvtx.range_pop()
 
+    # ============================================================================
+    # STAGE 4: FINALIZE - GRADIENT OFFLOAD & OPTIMIZER STEP
+    # ============================================================================
+    
+    # ------------------------------------------------------------------------
+    # 4.1: Bulk transfer all gradients from GPU back to CPU
+    # ------------------------------------------------------------------------
     torch.cuda.nvtx.range_push("send grads back to cpu")
+    # Copy accumulated gradients from GPU to pinned CPU memory
+    # This is a single bulk transfer rather than per-camera transfers
     gaussians._xyz.grad.copy_(xyz_gpu_grad)
     gaussians._opacity.grad.copy_(_opacity_gpu_grad)
     gaussians._scaling.grad.copy_(_scaling_gpu_grad)
@@ -1056,31 +1125,44 @@ def fairBraindead_offload_impl(
     gaussians._features_rest.grad.copy_(_features_rest_gpu_grad)
     torch.cuda.nvtx.range_pop()
 
-    torch.cuda.synchronize()
+    torch.cuda.synchronize()  # Wait for all GPU operations to complete
 
+    # ------------------------------------------------------------------------
+    # 4.2: Perform optimizer step on CPU
+    # ------------------------------------------------------------------------
     timers.start("grad scale + optimizer step + zero grad")
+    
+    # Optional: measure time spent on CPU Adam optimization
     if args.log_cpu_adam_trailing_overhead:
         cpu_adam_trailing_start_event = torch.cuda.Event(enable_timing=True)
         cpu_adam_trailing_end_event = torch.cuda.Event(enable_timing=True)
         cpu_adam_trailing_start_event.record()
 
+    # Average gradients across batch size
     for param in gaussians.all_parameters():
         if param.grad is not None:
             param.grad /= args.bsz
+    
+    # Apply optimizer update
     if not args.stop_update_param:
         if sparse_adam:
+            # Sparse Adam: only update parameters that received gradients
             sparse_indices = torch.nonzero(visibility).flatten().to(torch.int32)
             sparse_indices = sparse_indices.to("cpu")
             # gaussians.optimizer.sparse_adam_inc_step()
             gaussians.optimizer.sparse_step(sparse_indices=sparse_indices)
         else:
+            # Dense Adam: update all parameters
             gaussians.optimizer.step()
+    
     gaussians.optimizer.zero_grad(set_to_none=True)
+    
+    # Log CPU Adam overhead if enabled
     if args.log_cpu_adam_trailing_overhead:
         cpu_adam_trailing_end_event.record()
         torch.cuda.synchronize()
         args.cpu_adam_trailing_overhead["step"] += 1
-        if args.cpu_adam_trailing_overhead["step"] > 3:
+        if args.cpu_adam_trailing_overhead["step"] > 3:  # Skip first 3 warmup steps
             args.cpu_adam_trailing_overhead["from_default_stream"] += cpu_adam_trailing_start_event.elapsed_time(cpu_adam_trailing_end_event)
 
     timers.stop("grad scale + optimizer step + zero grad")

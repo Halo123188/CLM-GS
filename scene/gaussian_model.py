@@ -291,20 +291,13 @@ class GaussianModel:
                 )
             )
 
-            if self.args.braindead_pin:
-                self._xyz = nn.Parameter(fused_point_cloud.pin_memory().requires_grad_(True))
-                self._features_dc = nn.Parameter(features[:, :, 0:1].transpose(1, 2).contiguous().pin_memory().requires_grad_(True))
-                self._features_rest = nn.Parameter(features[:, :, 1:].transpose(1, 2).contiguous().pin_memory().requires_grad_(True))
-                self._scaling = nn.Parameter(scales.pin_memory().requires_grad_(True))
-                self._rotation = nn.Parameter(rots.pin_memory().requires_grad_(True))
-                self._opacity = nn.Parameter(opacities.pin_memory().requires_grad_(True))
-            else:
-                self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
-                self._features_dc = nn.Parameter(features[:, :, 0:1].transpose(1, 2).contiguous().requires_grad_(True))
-                self._features_rest = nn.Parameter(features[:, :, 1:].transpose(1, 2).contiguous().requires_grad_(True))
-                self._scaling = nn.Parameter(scales.requires_grad_(True))
-                self._rotation = nn.Parameter(rots.requires_grad_(True))
-                self._opacity = nn.Parameter(opacities.requires_grad_(True))
+            self._xyz = nn.Parameter(fused_point_cloud.pin_memory().requires_grad_(True))
+            self._features_dc = nn.Parameter(features[:, :, 0:1].transpose(1, 2).contiguous().pin_memory().requires_grad_(True))
+            self._features_rest = nn.Parameter(features[:, :, 1:].transpose(1, 2).contiguous().pin_memory().requires_grad_(True))
+            self._scaling = nn.Parameter(scales.pin_memory().requires_grad_(True))
+            self._rotation = nn.Parameter(rots.pin_memory().requires_grad_(True))
+            self._opacity = nn.Parameter(opacities.pin_memory().requires_grad_(True))
+
 
 
             self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
@@ -1546,65 +1539,35 @@ class GaussianModel:
             N = sub_N
 
         if self.args.braindeath_offload:
-            if not self.args.braindead_pin:
-                self._xyz = nn.Parameter(
-                    _xyz.to(torch.float).to("cpu").requires_grad_(True)
-                )
-                self._features_dc = nn.Parameter(
-                    _features_dc.to(torch.float).to("cpu")
-                    .transpose(1, 2)
-                    .contiguous()
-                    .requires_grad_(True)
-                )
-                self._features_rest = nn.Parameter(
-                    _features_rest.to(torch.float).to("cpu")
-                    .transpose(1, 2)
-                    .contiguous()
-                    .requires_grad_(True)
-                )
-                self._opacity = nn.Parameter(
-                    _opacity.to(torch.float).to("cpu").requires_grad_(True)
-                )
-                self._scaling = nn.Parameter(
-                    _scaling.to(torch.float).to("cpu").requires_grad_(True)
-                )
-                self._rotation = nn.Parameter(
-                    _rotation.to(torch.float).to("cpu").requires_grad_(True)
-                )
-                self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
+            self._xyz = nn.Parameter(
+                _xyz.to(torch.float).to("cpu").pin_memory().requires_grad_(True)
+            )
+            self._features_dc = nn.Parameter(
+                _features_dc.to(torch.float).to("cpu")
+                .transpose(1, 2)
+                .contiguous()
+                .pin_memory()
+                .requires_grad_(True)
+            )
+            self._features_rest = nn.Parameter(
+                _features_rest.to(torch.float).to("cpu")
+                .transpose(1, 2)
+                .contiguous()
+                .pin_memory()
+                .requires_grad_(True)
+            )
+            self._opacity = nn.Parameter(
+                _opacity.to(torch.float).to("cpu").pin_memory().requires_grad_(True)
+            )
+            self._scaling = nn.Parameter(
+                _scaling.to(torch.float).to("cpu").pin_memory().requires_grad_(True)
+            )
+            self._rotation = nn.Parameter(
+                _rotation.to(torch.float).to("cpu").pin_memory().requires_grad_(True)
+            )
+            self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
 
-                self.active_sh_degree = self.max_sh_degree
-            
-            else:
-                self._xyz = nn.Parameter(
-                    _xyz.to(torch.float).to("cpu").pin_memory().requires_grad_(True)
-                )
-                self._features_dc = nn.Parameter(
-                    _features_dc.to(torch.float).to("cpu")
-                    .transpose(1, 2)
-                    .contiguous()
-                    .pin_memory()
-                    .requires_grad_(True)
-                )
-                self._features_rest = nn.Parameter(
-                    _features_rest.to(torch.float).to("cpu")
-                    .transpose(1, 2)
-                    .contiguous()
-                    .pin_memory()
-                    .requires_grad_(True)
-                )
-                self._opacity = nn.Parameter(
-                    _opacity.to(torch.float).to("cpu").pin_memory().requires_grad_(True)
-                )
-                self._scaling = nn.Parameter(
-                    _scaling.to(torch.float).to("cpu").pin_memory().requires_grad_(True)
-                )
-                self._rotation = nn.Parameter(
-                    _rotation.to(torch.float).to("cpu").pin_memory().requires_grad_(True)
-                )
-                self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
-
-                self.active_sh_degree = self.max_sh_degree
+            self.active_sh_degree = self.max_sh_degree
 
         elif self.args.offload:
             self.parameters_buffer = torch.empty(0)
