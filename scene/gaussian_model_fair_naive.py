@@ -404,122 +404,6 @@ class GaussianModelBraindeathOffload(BaseGaussianModel):
         utils.log_cpu_memory_usage("finish write ply file")
         # remark: max_radii2D, xyz_gradient_accum and denom are not saved here; they are save elsewhere.
 
-    def distributed_load_ply(self, folder):
-        args = utils.get_args()
-        # count the number of files like "point_cloud_rk0_ws4.ply"
-        world_size = -1
-        for f in os.listdir(folder):
-            if "_ws" in f:
-                world_size = int(f.split("_ws")[1].split(".")[0])
-                break
-        assert world_size > 0, "world_size should be greater than 1."
-
-        catted_xyz = []
-        catted_features_dc = []
-        catted_features_rest = []
-        catted_opacity = []
-        catted_scaling = []
-        catted_rotation = []
-        for rk in range(min(world_size, self.args.load_ply_max)):
-            one_checkpoint_path = (
-                folder + "/point_cloud_rk" + str(rk) + "_ws" + str(world_size) + ".ply"
-            )
-            xyz, features_dc, features_extra, opacities, scales, rots = (
-                self.load_raw_ply(one_checkpoint_path)
-            )
-            catted_xyz.append(xyz)
-            catted_features_dc.append(features_dc)
-            catted_features_rest.append(features_extra)
-            catted_opacity.append(opacities)
-            catted_scaling.append(scales)
-            catted_rotation.append(rots)
-        catted_xyz = np.concatenate(catted_xyz, axis=0)
-        catted_features_dc = np.concatenate(catted_features_dc, axis=0)
-        catted_features_rest = np.concatenate(catted_features_rest, axis=0)
-        catted_opacity = np.concatenate(catted_opacity, axis=0)
-        catted_scaling = np.concatenate(catted_scaling, axis=0)
-        catted_rotation = np.concatenate(catted_rotation, axis=0)
-        
-        N = catted_xyz.shape[0]
-
-        _xyz = torch.from_numpy(catted_xyz)
-        _opacity = torch.from_numpy(catted_opacity)
-        _scaling = torch.from_numpy(catted_scaling)
-        _rotation = torch.from_numpy(catted_rotation)
-        _features_dc = torch.from_numpy(catted_features_dc)
-        _features_rest = torch.from_numpy(catted_features_rest)
-
-        # upsampling and downsampling the init pcd
-        if args.upsample_ratio != 0.0:
-            assert args.subsample_ratio == 1.0, "Can not upsample and subsample at the same time"
-
-            up_N = int(N * args.upsample_ratio)
-            print("Upsample ratio: ", args.upsample_ratio)
-
-            perm_generator = torch.Generator()
-            perm_generator.manual_seed(1)
-            upsampled_set_cpu, _ = torch.randperm(N)[:(up_N % N)].sort()
-
-            _xyz_up = torch.cat([_xyz] * (up_N // N) + [_xyz[upsampled_set_cpu]])
-            _opacity_up = torch.cat([_opacity] * (up_N // N) + [_opacity[upsampled_set_cpu]])
-            _scaling_up = torch.cat([_scaling] * (up_N // N) + [_scaling[upsampled_set_cpu]])
-            _rotation_up = torch.cat([_rotation] * (up_N // N) + [_rotation[upsampled_set_cpu]])
-            _features_dc_up = torch.cat([_features_dc] * (up_N // N) + [_features_dc[upsampled_set_cpu]])
-            _features_rest_up = torch.cat([_features_rest] * (up_N // N) + [_features_rest[upsampled_set_cpu]])
-
-            scaling_up = torch.exp(_scaling_up)
-            noise = (torch.rand_like(_xyz_up) + 0.5) * torch.clamp(scaling_up, max=30)
-            _xyz_up.add_(noise)
-            _xyz = torch.cat((_xyz, _xyz_up))
-            _opacity = torch.cat((_opacity, _opacity_up))
-            _scaling = torch.cat((_scaling, _scaling_up))
-            _rotation = torch.cat((_rotation, _rotation_up))
-            _features_dc = torch.cat((_features_dc, _features_dc_up))
-            _features_rest = torch.cat((_features_rest, _features_rest_up))
-            N = N + up_N
-            print("Number of points after upsampling : ", _xyz.shape[0])
-        elif args.subsample_ratio != 1.0:
-            assert self.args.subsample_ratio > 0 and self.args.subsample_ratio < 1
-            sub_N = int(N * self.args.subsample_ratio)
-            print("Subsample ratio: ", self.args.subsample_ratio)
-            print("Number of points after subsampling : ", sub_N)
-
-            perm_generator = torch.Generator()
-            perm_generator.manual_seed(1)
-            subsampled_set_cpu, _ = torch.randperm(N)[:sub_N].sort()
-
-            _xyz = _xyz[subsampled_set_cpu]
-            _opacity = _opacity[subsampled_set_cpu]
-            _scaling = _scaling[subsampled_set_cpu]
-            _rotation = _rotation[subsampled_set_cpu]
-            _features_dc = _features_dc[subsampled_set_cpu]
-            _features_rest = _features_rest[subsampled_set_cpu]
-            N = sub_N
-
-        # Initialize in CPU pinned memory
-        self._xyz = nn.Parameter(_xyz.to(torch.float).to("cpu").pin_memory().requires_grad_(True))
-        self._features_dc = nn.Parameter(
-            _features_dc.to(torch.float).to("cpu")
-            .transpose(1, 2)
-            .contiguous()
-            .pin_memory()
-            .requires_grad_(True)
-        )
-        self._features_rest = nn.Parameter(
-            _features_rest.to(torch.float).to("cpu")
-            .transpose(1, 2)
-            .contiguous()
-            .pin_memory()
-            .requires_grad_(True)
-        )
-        self._opacity = nn.Parameter(_opacity.to(torch.float).to("cpu").pin_memory().requires_grad_(True))
-        self._scaling = nn.Parameter(_scaling.to(torch.float).to("cpu").pin_memory().requires_grad_(True))
-        self._rotation = nn.Parameter(_rotation.to(torch.float).to("cpu").pin_memory().requires_grad_(True))
-        self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cpu")
-
-        self.active_sh_degree = self.max_sh_degree
-
-
     def load_raw_ply(self, path):
         print("Loading ", path)
         plydata = PlyData.read(path)
@@ -676,10 +560,7 @@ class GaussianModelBraindeathOffload(BaseGaussianModel):
         self.active_sh_degree = self.max_sh_degree
 
     def load_ply(self, path):
-        if os.path.exists(os.path.join(path, "point_cloud.ply")):
-            self.one_file_load_ply(path)
-        else:
-            self.distributed_load_ply(path)
+        self.one_file_load_ply(path)
 
     def reset_opacity(self):
         utils.LOG_FILE.write("Resetting opacity to 0.01\n")
