@@ -1020,3 +1020,22 @@ class GaussianModelBraindeathOffload(BaseGaussianModel):
             new_rotation,
             None,
         )
+
+    def gsplat_add_densification_stats_exact_filter(
+        self, viewspace_point_tensor_grad, radii, send2gpu_final_filter_indices, width, height
+    ):
+        viewspace_point_tensor_grad = viewspace_point_tensor_grad.cpu()
+        radii = radii.cpu()
+        send2gpu_final_filter_indices = send2gpu_final_filter_indices.cpu()
+
+        self.max_radii2D[send2gpu_final_filter_indices] = torch.max(
+            self.max_radii2D[send2gpu_final_filter_indices], radii
+        )
+        grad = viewspace_point_tensor_grad  # (N, 2)
+        # Normalize the gradients to [-1, 1] screen size
+        grad[:, 0] *= width * 0.5
+        grad[:, 1] *= height * 0.5
+        self.xyz_gradient_accum[send2gpu_final_filter_indices] += torch.norm(
+            grad, dim=-1, keepdim=True
+        )
+        self.denom[send2gpu_final_filter_indices] += 1

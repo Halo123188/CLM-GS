@@ -1067,19 +1067,18 @@ def fairBraindead_offload_impl(
         loss.backward()
         losses.append(loss.detach())
 
-        # with torch.no_grad():
-        #     # Update densification state.
-        #     # import pdb; pdb.set_trace()
-        #     update_densification_stats_pipelineoffload_xyzosr(
-        #         scene,
-        #         gaussians,
-        #         int(utils.get_img_height()),
-        #         int(utils.get_img_width()),
-        #         # torch.nonzero((radiis > 0)).flatten(),
-        #         this_filter,
-        #         means2D.grad.squeeze(0),
-        #         radiis.squeeze(0),
-        #     )
+        with torch.no_grad():
+            # Update densification state.
+            # import pdb; pdb.set_trace()
+            update_densification_stats_pipelineoffload_xyzosr(
+                scene,
+                gaussians,
+                int(utils.get_img_height()),
+                int(utils.get_img_width()),
+                this_filter,# on gpu
+                means2D.grad.squeeze(0),# on gpu
+                radiis.squeeze(0), # on gpu
+            )
         
         # ------------------------------------------------------------------------
         # 3.4: Accumulate gradients back to full-size buffers
