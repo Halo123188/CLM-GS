@@ -16,7 +16,7 @@ from random import randint
 from torch.utils.data import Dataset
 from utils.system_utils import searchForMaxIteration
 from scene.dataset_readers import sceneLoadTypeCallbacks
-from scene.gaussian_model import GaussianModel
+from scene.gaussian_model import BaseGaussianModel
 from utils.camera_utils import cameraList_from_camInfos, camera_to_JSON, loadCam, predecode_dataset_to_disk, clean_up_disk, loadCam_raw_from_disk
 import utils.general_utils as utils
 import psutil
@@ -24,10 +24,10 @@ from scene.cameras import set_space_sort_key_dim
 
 class Scene:
 
-    gaussians: GaussianModel
+    gaussians: BaseGaussianModel
 
     def __init__(
-        self, args, gaussians: GaussianModel, load_iteration=None, shuffle=True
+        self, args, gaussians: BaseGaussianModel, load_iteration=None, shuffle=True
     ):
         """b
         :param path: Path to colmap scene main folder.
@@ -195,10 +195,8 @@ class Scene:
         elif args.load_ply_path != '':
             self.gaussians.load_ply(args.load_ply_path)
         else:
-            if args.offload:
-                self.gaussians.create_from_pcd_offloaded(scene_info.point_cloud, self.cameras_extent, args.subsample_ratio)
-            else:
-                self.gaussians.create_from_pcd(scene_info.point_cloud, self.cameras_extent, args.subsample_ratio)
+            # Both model types use create_from_pcd_offloaded
+            self.gaussians.create_from_pcd_offloaded(scene_info.point_cloud, self.cameras_extent, args.subsample_ratio)
 
         utils.check_initial_gpu_memory_usage("after initializing point cloud")
         utils.log_cpu_memory_usage("after loading initial 3dgs points")

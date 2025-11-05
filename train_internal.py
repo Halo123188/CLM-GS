@@ -4,7 +4,9 @@ import json
 from utils.loss_utils import l1_loss
 from torch.cuda import nvtx
 from torch.utils.data import DataLoader
-from scene import Scene, GaussianModel, SceneDataset, OffloadSceneDataset
+from scene import Scene, SceneDataset, OffloadSceneDataset
+from scene.gaussian_model_fair_naive import GaussianModelBraindeathOffload
+from scene.gaussian_model_final import GaussianModelXYZOSROffload
 from utils.general_utils import prepare_output_and_logger
 import utils.general_utils as utils
 from utils.timer import Timer, End2endTimer
@@ -1315,7 +1317,17 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
     # ------------------------------------------------------------------------
     # 1.2: Initialize scene and gaussian model
     # ------------------------------------------------------------------------
-    gaussians = GaussianModel(sh_degree=dataset_args.sh_degree)
+    # Select the appropriate Gaussian model based on offload strategy
+    if args.braindeath_offload:
+        gaussians = GaussianModelBraindeathOffload(sh_degree=dataset_args.sh_degree)
+        utils.print_rank_0("Using GaussianModelBraindeathOffload")
+        log_file.write("Using GaussianModelBraindeathOffload\n")
+    elif args.gpu_cache == "xyzosr":
+        gaussians = GaussianModelXYZOSROffload(sh_degree=dataset_args.sh_degree)
+        utils.print_rank_0("Using GaussianModelXYZOSROffload")
+        log_file.write("Using GaussianModelXYZOSROffload\n")
+    else:
+        raise ValueError(f"Invalid offload configuration: braindeath_offload={args.braindeath_offload}, gpu_cache={args.gpu_cache}")
 
     with torch.no_grad():
         scene = Scene(args, gaussians)
