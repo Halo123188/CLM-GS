@@ -36,6 +36,7 @@ from arguments import (
 from scene import Scene, OffloadSceneDataset
 from strategies.naive_offload import GaussianModelNaiveOffload, naive_offload_train_one_batch, naive_offload_eval_one_cam
 from strategies.clm_offload import GaussianModelCLMOffload, clm_offload_train_one_batch, clm_offload_eval_one_cam
+from strategies.no_offload import GaussianModelNoOffload, baseline_accumGrads_impl, baseline_accumGrads_micro_step
 
 from utils.general_utils import safe_state, prepare_output_and_logger
 import utils.general_utils as utils
@@ -93,8 +94,12 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
         gaussians = GaussianModelCLMOffload(sh_degree=dataset_args.sh_degree)
         utils.print_rank_0("Using GaussianModelCLMOffload")
         log_file.write("Using GaussianModelCLMOffload\n")
+    elif args.no_offload:
+        gaussians = GaussianModelNoOffload(sh_degree=dataset_args.sh_degree)
+        utils.print_rank_0("Using GaussianModelNoOffload (no offload, GPU-only)")
+        log_file.write("Using GaussianModelNoOffload (no offload, GPU-only)\n")
     else:
-        raise ValueError(f"Invalid offload configuration: braindeath_offload={args.naive_offload}, final_offload={args.clm_offload}")
+        raise ValueError(f"Invalid offload configuration: naive_offload={args.naive_offload}, clm_offload={args.clm_offload}, no_offload={args.no_offload}")
 
     with torch.no_grad():
         scene = Scene(args, gaussians)
@@ -352,8 +357,37 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
             )
             log_file.write(log_string)
 
+        elif args.no_offload:# This is GPU baseline. 
+            losses, visibility = baseline_accumGrads_impl(
+                gaussians,
+                scene,
+                batched_cameras,
+                background,
+                sparse_adam=args.sparse_adam
+            )
+            batched_screenspace_pkg = {}
+            
+            batched_loss = torch.stack(losses)
+            batched_loss_cpu = batched_loss.cpu().numpy()
+            ema_loss_for_log = (
+                batched_loss_cpu.mean()
+                if ema_loss_for_log is None
+                else 0.6 * ema_loss_for_log + 0.4 * batched_loss_cpu.mean()
+            )
+            # Update Epoch Statistics
+            train_dataset.update_losses(batched_loss_cpu)
+            # Logging
+            batched_loss_cpu = [round(loss, 6) for loss in batched_loss_cpu]
+            log_string = "iteration[{},{}) loss: {} image: {}\n".format(
+                iteration,
+                iteration + args.bsz,
+                batched_loss_cpu,
+                [viewpoint_cam.image_name for viewpoint_cam in batched_cameras],
+            )
+            log_file.write(log_string)
         else:
-            raise ValueError("Accumulate grads is not supported")
+            raise ValueError("Invalid configuration")
+
 
         with torch.no_grad():
             # ------------------------------------------------------------------------
@@ -636,7 +670,6 @@ def training_report(
                     camera.camtoworlds = torch.inverse(camera.world_view_transform.transpose(0, 1)).unsqueeze(0)
 
                     if args.naive_offload:
-
                         rendered_image = naive_offload_eval_one_cam(
                             camera=camera,
                             gaussians=scene.gaussians,
@@ -651,6 +684,20 @@ def training_report(
                             gaussians=scene.gaussians,
                             background=background,
                             scene=scene
+                        )
+                        batched_image.append(rendered_image)
+                    
+                    elif args.no_offload:
+                        rendered_image, _, _, _ = baseline_accumGrads_micro_step(
+                            means3D=scene.gaussians.get_xyz,
+                            opacities=scene.gaussians.get_opacity,
+                            scales=scene.gaussians.get_scaling,
+                            rotations=scene.gaussians.get_rotation,
+                            shs=scene.gaussians.get_features,
+                            sh_degree=scene.gaussians.active_sh_degree,
+                            camera=camera,
+                            background=background,
+                            mode="eval"
                         )
                         batched_image.append(rendered_image)
                     else:

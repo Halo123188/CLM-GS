@@ -113,7 +113,7 @@ class BaseGaussianModel(ABC):
             self.active_sh_degree += 1
 
     @abstractmethod
-    def create_from_pcd_offloaded(self, pcd: BasicPointCloud, spatial_lr_scale: float):
+    def create_from_pcd(self, pcd: BasicPointCloud, spatial_lr_scale: float):
         """Initialize parameters from point cloud data"""
         pass
 

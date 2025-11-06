@@ -81,6 +81,9 @@ class AuxiliaryParams(ParamGroup):
         self.grid_size_D = 32            # Grid size for depth dimension
         self.prealloc_capacity = 5_000_000  # Pre-allocated capacity for parameters
 
+        # --- No Offload (GPU Baseline) ---
+        self.no_offload = False          # Enable no offload mode
+
         # --- Shared Offload Optimization Flags (used by both modes) ---
         self.sparse_adam = False         # Use sparse Adam optimizer (only update visible Gaussians)
         self.fused_adam = "default"      # Fused Adam implementation: "default" or other variants
@@ -305,7 +308,7 @@ def find_latest_checkpoint(log_folder):
 
 def init_args(args):
 
-    assert ((args.clm_offload != args.naive_offload) and (args.clm_offload or args.naive_offload)),  "either final_offload or braindeath_offload must be True, and only one of them can be True"
+    assert sum([args.clm_offload, args.naive_offload, args.no_offload]) == 1, "Exactly one of clm_offload, naive_offload, or no_offload must be True"
 
     # Logging are saved with where model is saved.
     args.log_folder = args.model_path

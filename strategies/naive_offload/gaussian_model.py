@@ -31,7 +31,7 @@ class GaussianModelNaiveOffload(BaseGaussianModel):
     def _get_device(self):
         return "cpu"
 
-    def create_from_pcd_offloaded(self, pcd: BasicPointCloud, spatial_lr_scale: float):
+    def create_from_pcd(self, pcd: BasicPointCloud, spatial_lr_scale: float):
         log_file = utils.get_log_file()
         self.spatial_lr_scale = spatial_lr_scale
 
