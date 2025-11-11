@@ -183,12 +183,14 @@ def order_calculation(filters, batched_cameras, n_gaussians, bsz, perm_generator
     ffs = torch.empty(n_gaussians, dtype=torch.uint8, device="cuda")
     clm_kernels.extract_ffs(gs_bitmap, ffs)
     sorted_ffs, indices = torch.sort(ffs)
+    # indices = indices.to(torch.int32) # convert to int32 because we assume the maximum gaussian index is less than 2^32
     elems, counts = torch.unique_consecutive(sorted_ffs, return_counts=True)
     update_ls = torch.split(indices, counts.tolist(), dim=0)
     update_ls = list(update_ls)
     for i in range(bsz + 1):
         if i not in elems: # check if there is empty update
-            update_ls.insert(i, torch.tensor([], device="cuda"))
+            # update_ls.insert(i, torch.tensor([], device="cuda"))
+            update_ls.insert(i, torch.tensor([], dtype=torch.int64, device="cuda"))
     update_ls = [update_ls[0]] + update_ls[:0:-1]
 
     if args.sparse_adam:
@@ -213,7 +215,8 @@ def order_calculation(filters, batched_cameras, n_gaussians, bsz, perm_generator
     del gs_bitmap, tmp_buffer, filter_len
 
     torch.cuda.nvtx.range_push("transfer cpuadam update list and sums to cpu")
-    data2cpu_ls = update_ls + [cnt_h, cnt_d, cnt_g]
+    cnt_h, cnt_d, cnt_g = cnt_h.to(torch.int64), cnt_d.to(torch.int64), cnt_g.to(torch.int64) # then, it shares the same types with update_ls. 
+    data2cpu_ls = update_ls + [cnt_h, cnt_d, cnt_g] # this is risky operation: update_ls is int64, but cnt_h, cnt_d, cnt_g are int32. 
     cat_data2cpu = torch.cat(data2cpu_ls, dim=0).to(torch.int32)
     cat_data2cpu_h = torch.empty_like(cat_data2cpu, device="cpu", pin_memory=True)
     data2cpu_dim = [len(d) for d in data2cpu_ls]
@@ -240,6 +243,14 @@ def order_calculation(filters, batched_cameras, n_gaussians, bsz, perm_generator
 
     assert len(finish_indices_filters) == bsz + 1, "len(finish_indices_filters) should be equal to bsz + 1"
     assert sum([len(indicies) for indicies in finish_indices_filters]) == n_gaussians, f"{sum([len(indicies) for indicies in finish_indices_filters])}, {n_gaussians}"
+    # Check max index (skip empty tensors)
+    non_empty_max = [indicies.max().item() for indicies in finish_indices_filters if len(indicies) > 0]
+    if non_empty_max:
+        max_index = max(non_empty_max)
+        if max_index >= n_gaussians:
+            import pdb; pdb.set_trace()
+            print(f"WARNING: Found invalid index {max_index} >= {n_gaussians}, will filter it out")
+        # assert max_index < n_gaussians, f"max of indices < n_gaussians: {max_index} < {n_gaussians}"
 
     return finish_indices_filters, batched_cameras, filters, sparsity, ordered_cams, cnt_h, cnt_d, cnt_g, visibility_mask
 
@@ -344,7 +355,13 @@ def clm_offload_train_one_batch(
     # ============================================================================
     # Start a background thread to perform CPU Adam updates asynchronously
     # This overlaps CPU optimization with GPU computation
-    signal_tensor_pinned = torch.zeros(bsz, dtype=torch.int32, device="cpu", pin_memory=True)
+    if not hasattr(gaussians, 'signal_tensor_pinned'):
+        gaussians.signal_tensor_pinned = torch.zeros(bsz, dtype=torch.int32, device="cpu", pin_memory=True)
+    else:
+        gaussians.signal_tensor_pinned.zero_()
+    signal_tensor_pinned = gaussians.signal_tensor_pinned # does not help. 
+    torch.cuda.synchronize() # does not help. 
+
     microbatch_idx = 0
     cpuadam_worker = threading.Thread(
         target=cpuadam_thread,

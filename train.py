@@ -14,6 +14,10 @@ import sys
 import json
 import gc
 import psutil
+# import faulthandler
+
+# faulthandler_log = open("fault.log", "w")
+# faulthandler.enable(file=faulthandler_log, all_threads=True)
 
 import torch
 import torch.multiprocessing
@@ -126,10 +130,10 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
     dataloader = DataLoader(
         train_dataset,
         batch_size=args.bsz,
-        num_workers=1,          # Single worker for sequential loading
+        # num_workers=1,          # Single worker for sequential loading
         shuffle=True,            # Randomize camera order
         drop_last=True,          # Drop incomplete batches
-        persistent_workers=True, # Keep workers alive between epochs
+        # persistent_workers=True, # Keep workers alive between epochs
         pin_memory=True,         # Enable faster GPU transfers
         collate_fn=(lambda batch: batch)
     )
@@ -174,6 +178,10 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
     for iteration in range(
         start_from_this_iteration, opt_args.iterations + 1, args.bsz
     ):
+        # # rewrite the checking iterations
+        # checking_iterations = [28224, 51712, 65536, 86784]
+        # if iteration + 64 - 1 in checking_iterations:
+        #     import pdb; pdb.set_trace()
         # ------------------------------------------------------------------------
         # 2.1: Iteration setup and profiling
         # ------------------------------------------------------------------------
@@ -641,6 +649,7 @@ def training_report(
                 eval_dataset,
                 batch_size=1,
                 # shuffle=True,
+                num_workers=1,
                 pin_memory=True,
                 collate_fn=(lambda batch: batch)
             )
@@ -722,8 +731,8 @@ def training_report(
                     )
 
                     if idx + camera_id < num_cameras + 1:
-                        l1_test += l1_loss(image, gt_image).mean().double()
-                        psnr_test += psnr(image, gt_image).mean().double()
+                        l1_test += l1_loss(image, gt_image).mean().double().item()
+                        psnr_test += psnr(image, gt_image).mean().double().item()
                     gt_camera.original_image = None
             
             psnr_test /= num_cameras

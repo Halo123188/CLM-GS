@@ -141,7 +141,7 @@ class Scene:
             do_decode = True
         else:
             log_file.write(f"[NOTE]: Reusing decoded dataset({dataset_size_in_GB}GB) in disk dir: {self.decode_dataset_path}\n")
-            utils.print_rank_0("Reusing decoded datase on disk.")
+            utils.print_rank_0(f"Reusing decoded dataset on disk: {self.decode_dataset_path}")
             do_decode = False
 
         self.train_cameras = None

@@ -11,6 +11,8 @@
 
 import os
 import shutil
+
+from numba.cuda.cudadrv.runtime import Runtime
 from scene.cameras import Camera
 import numpy as np
 from utils.general_utils import PILtoTorch, get_args, get_log_file
@@ -77,8 +79,12 @@ def loadCam_raw_from_disk(args, id, cam_info, to_gpu=False):
     orig_h, orig_w = utils.get_img_size()
     
     # Get dececoded gt_image from disk
-    with open(os.path.join(args.decode_dataset_path, 'dataset_raw', (cam_info.image_name.lstrip('/') + '.raw')), 'rb') as raw_file:
-        raw_data = raw_file.read()
+    try:
+        with open(os.path.join(args.decode_dataset_path, 'dataset_raw', (cam_info.image_name.lstrip('/') + '.raw')), 'rb') as raw_file:
+            raw_data = raw_file.read()
+    except RuntimeError as e:
+        raise RuntimeError(e)
+
     raw_np = np.frombuffer(raw_data, dtype=np.uint8)
     if to_gpu:
         image_tensor_host = torch.tensor(raw_np, dtype=torch.uint8).view(orig_h, orig_w, -1).permute(2, 0, 1).pin_memory()
