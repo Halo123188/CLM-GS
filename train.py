@@ -130,10 +130,10 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
     dataloader = DataLoader(
         train_dataset,
         batch_size=args.bsz,
-        # num_workers=1,          # Single worker for sequential loading
+        num_workers=1,          # Single worker for sequential loading
         shuffle=True,            # Randomize camera order
         drop_last=True,          # Drop incomplete batches
-        # persistent_workers=True, # Keep workers alive between epochs
+        persistent_workers=True, # Keep workers alive between epochs
         pin_memory=True,         # Enable faster GPU transfers
         collate_fn=(lambda batch: batch)
     )
