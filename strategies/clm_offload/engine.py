@@ -189,7 +189,6 @@ def order_calculation(filters, batched_cameras, n_gaussians, bsz, perm_generator
     update_ls = list(update_ls)
     for i in range(bsz + 1):
         if i not in elems: # check if there is empty update
-            # update_ls.insert(i, torch.tensor([], device="cuda"))
             update_ls.insert(i, torch.tensor([], dtype=torch.int64, device="cuda"))
     update_ls = [update_ls[0]] + update_ls[:0:-1]
 
@@ -215,8 +214,8 @@ def order_calculation(filters, batched_cameras, n_gaussians, bsz, perm_generator
     del gs_bitmap, tmp_buffer, filter_len
 
     torch.cuda.nvtx.range_push("transfer cpuadam update list and sums to cpu")
-    cnt_h, cnt_d, cnt_g = cnt_h.to(torch.int64), cnt_d.to(torch.int64), cnt_g.to(torch.int64) # then, it shares the same types with update_ls. 
-    data2cpu_ls = update_ls + [cnt_h, cnt_d, cnt_g] # this is risky operation: update_ls is int64, but cnt_h, cnt_d, cnt_g are int32. 
+    cnt_h, cnt_d, cnt_g = cnt_h.to(torch.int64), cnt_d.to(torch.int64), cnt_g.to(torch.int64) # Then, cnt_h, cnt_d, cnt_g shares the same types with update_ls. 
+    data2cpu_ls = update_ls + [cnt_h, cnt_d, cnt_g] # update_ls, cnt_h, cnt_d, cnt_g should all be int64. 
     cat_data2cpu = torch.cat(data2cpu_ls, dim=0).to(torch.int32)
     cat_data2cpu_h = torch.empty_like(cat_data2cpu, device="cpu", pin_memory=True)
     data2cpu_dim = [len(d) for d in data2cpu_ls]

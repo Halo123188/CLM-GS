@@ -179,9 +179,6 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
         start_from_this_iteration, opt_args.iterations + 1, args.bsz
     ):
         # # rewrite the checking iterations
-        # checking_iterations = [28224, 51712, 65536, 86784]
-        # if iteration + 64 - 1 in checking_iterations:
-        #     import pdb; pdb.set_trace()
         # ------------------------------------------------------------------------
         # 2.1: Iteration setup and profiling
         # ------------------------------------------------------------------------
