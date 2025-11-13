@@ -222,7 +222,7 @@ def generate_trajectory_cameras(
     # Generate trajectory based on type
     if traj_path == "original":
         print(f"Using original training poses: {len(train_c2w)} cameras")
-        c2w_traj = train_c2w[:, :3, :]
+        c2w_traj = train_c2w[:n_frames, :3, :] # only keep the first n_frames poses
     else:
         # Use subset of poses for trajectory generation (skip first/last few)
         train_c2w_subset = train_c2w[5:-5] if len(train_c2w) > 10 else train_c2w
@@ -256,6 +256,7 @@ def generate_trajectory_cameras(
     ], axis=1)
     
     # Create Camera objects for each pose
+    # import pdb; pdb.set_trace()
     trajectory_cameras = []
     for idx, c2w in enumerate(c2w_traj_homo):
         camera = create_camera_from_c2w(
@@ -281,7 +282,6 @@ def render_trajectory_video(
     trajectory_cameras: List[Camera],
     output_path: str,
     background: torch.Tensor,
-    max_frames: Optional[int] = None,
     render_depth: bool = True,
 ):
     """
@@ -295,16 +295,10 @@ def render_trajectory_video(
         trajectory_cameras: List of cameras for trajectory
         output_path: Path to save output video
         background: Background color tensor
-        max_frames: Maximum number of frames to render (None = all)
         render_depth: Whether to include depth visualization
     """
     # Limit number of frames if specified
     total_frames = len(trajectory_cameras)
-    if max_frames is not None and max_frames > 0:
-        total_frames = min(total_frames, max_frames)
-        trajectory_cameras = trajectory_cameras[:total_frames]
-        print(f"Limiting to first {total_frames} frames")
-    
     # Create video writer
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     writer = imageio.get_writer(output_path, fps=30)
@@ -323,6 +317,7 @@ def render_trajectory_video(
             camera.world_view_transform.transpose(0, 1)
         ).unsqueeze(0)
         
+        # import pdb; pdb.set_trace()
         # Render frame based on offload strategy
         if args.naive_offload:
             rendered_image = naive_offload_eval_one_cam(
@@ -388,13 +383,11 @@ def main():
     debug_p = DebugParams(parser)
     
     # Add trajectory-specific arguments
-    parser.add_argument("--traj_path", type=str, default="interp",
+    parser.add_argument("--traj_path", type=str, default="original",
                        choices=["interp", "ellipse", "spiral", "original"],
                        help="Type of camera trajectory")
     parser.add_argument("--n_frames", type=int, default=120,
                        help="Number of frames to generate (ignored for 'original')")
-    parser.add_argument("--max_frames", type=int, default=None,
-                       help="Maximum frames to render (None = all)")
     parser.add_argument("--output_dir", type=str, default=None,
                        help="Output directory (default: model_path/render_traj)")
     parser.add_argument("--iteration", type=int, default=-1,
@@ -456,29 +449,34 @@ def main():
         scene_info, cameras_extent = load_scene_info_for_rendering(args)
         utils.print_rank_0("Loaded scene metadata (camera poses and intrinsics)")
         
-        # Determine which iteration to load
-        if args.iteration == -1:
-            loaded_iter = searchForMaxIteration(
-                os.path.join(args.model_path, "point_cloud")
-            )
+        if args.load_pt_path != '':
+            gaussians.load_tensors(args.load_pt_path)
+            utils.print_rank_0(f"Loaded Gaussians from {args.load_pt_path}")
+        elif args.load_ply_path != '':
+            gaussians.load_ply(args.load_ply_path)
+            utils.print_rank_0(f"Loaded Gaussians from {args.load_ply_path}")
         else:
-            loaded_iter = args.iteration
-        
-        utils.print_rank_0(f"Loading Gaussians from iteration {loaded_iter}...")
-        
-        # Manually load the trained Gaussian model from PLY file
-        ply_path = os.path.join(
-            args.model_path, "point_cloud", f"iteration_{loaded_iter}"
-        )
-        gaussians.load_ply(ply_path)
-        
-        utils.print_rank_0(f"Loaded {len(gaussians._xyz)} Gaussians from iteration {loaded_iter}")
+            if args.iteration == -1:
+                loaded_iter = searchForMaxIteration(
+                    os.path.join(args.model_path, "point_cloud")
+                )
+            else:
+                loaded_iter = args.iteration
+            ply_path = os.path.join(
+                args.model_path, "point_cloud", f"iteration_{loaded_iter}"
+            )
+            gaussians.load_ply(ply_path)
+            utils.print_rank_0(f"Loaded Gaussians from iteration {loaded_iter}...") 
+
+        utils.print_rank_0(f"Loaded {len(gaussians._xyz)} Gaussians.")
         
         # Set active SH degree to maximum for best quality rendering
         # During training, SH degree is progressively increased
         # For rendering, we use the maximum degree for best visual quality
         gaussians.active_sh_degree = gaussians.max_sh_degree
     
+    # import pdb; pdb.set_trace()
+
     # know the image width and height
     image_width = scene_info.train_cameras[0].width
     image_height = scene_info.train_cameras[0].height
@@ -562,7 +560,6 @@ def main():
         trajectory_cameras=trajectory_cameras,
         output_path=video_path,
         background=background,
-        max_frames=args.max_frames,
     )
     
     # Cleanup
