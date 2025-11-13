@@ -27,7 +27,7 @@ class Scene:
     gaussians: BaseGaussianModel
 
     def __init__(
-        self, args, gaussians: BaseGaussianModel, load_iteration=None, shuffle=True
+        self, args, gaussians: BaseGaussianModel, load_iteration=None, shuffle=True, only_for_rendering=False
     ):
         """b
         :param path: Path to colmap scene main folder.
@@ -39,15 +39,6 @@ class Scene:
         self.train_cameras_info = None
         self.test_cameras_info = None
         log_file = utils.get_log_file()
-
-        if load_iteration:
-            if load_iteration == -1:
-                self.loaded_iter = searchForMaxIteration(
-                    os.path.join(self.model_path, "point_cloud")
-                )
-            else:
-                self.loaded_iter = load_iteration
-            print("Loading trained model at iteration {}".format(self.loaded_iter))
 
         utils.log_cpu_memory_usage("before loading images meta data")
 
@@ -190,16 +181,23 @@ class Scene:
         utils.check_initial_gpu_memory_usage("after Loading all images")
         utils.log_cpu_memory_usage("after decoding images")
 
-        if self.loaded_iter:
+        if args.load_pt_path != '':
+            self.gaussians.load_tensors(args.load_pt_path)
+        elif args.load_ply_path != '':
+            self.gaussians.load_ply(args.load_ply_path)
+        elif load_iteration:
+            if load_iteration == -1:
+                self.loaded_iter = searchForMaxIteration(
+                    os.path.join(self.model_path, "point_cloud")
+                )
+            else:
+                self.loaded_iter = load_iteration
+            print("Loading trained model at iteration {}".format(self.loaded_iter))
             self.gaussians.load_ply(
                 os.path.join(
                     self.model_path, "point_cloud", "iteration_" + str(self.loaded_iter)
                 )
             )
-        elif args.load_pt_path != '':
-            self.gaussians.load_tensors(args.load_pt_path)
-        elif args.load_ply_path != '':
-            self.gaussians.load_ply(args.load_ply_path)
         else:
             # Three model types use create_from_pcd
             self.gaussians.create_from_pcd(scene_info.point_cloud, self.cameras_extent)

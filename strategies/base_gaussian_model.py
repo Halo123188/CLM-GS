@@ -49,7 +49,7 @@ class BaseGaussianModel(ABC):
 
         self.rotation_activation = torch.nn.functional.normalize
 
-    def __init__(self, sh_degree: int):
+    def __init__(self, sh_degree: int, only_for_rendering: bool = False):
         args = utils.get_args()
         self.args = args
         
@@ -73,6 +73,7 @@ class BaseGaussianModel(ABC):
         self.spatial_lr_scale = 0
         self.parameters_buffer = torch.empty(0)
         self.parameters_grad_buffer = torch.empty(0)
+        self.only_for_rendering = only_for_rendering
         self.setup_functions()
         self.device = self._get_device()
 

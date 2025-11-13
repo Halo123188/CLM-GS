@@ -39,10 +39,11 @@ class GaussianModelCLMOffload(BaseGaussianModel):
         # Allocate pinned buffers for features
         parameters_buffer_array = numba.cuda.pinned_array((self.args.prealloc_capacity, 48), dtype=np.float32)
         self.parameters_buffer = torch.from_numpy(parameters_buffer_array)
-        parameters_grad_buffer_array = numba.cuda.pinned_array((self.args.prealloc_capacity, 48), dtype=np.float32)
-        self.parameters_grad_buffer = torch.from_numpy(parameters_grad_buffer_array)
         assert self.parameters_buffer.is_pinned()
-        assert self.parameters_grad_buffer.is_pinned()
+        if not self.only_for_rendering:
+            parameters_grad_buffer_array = numba.cuda.pinned_array((self.args.prealloc_capacity, 48), dtype=np.float32)
+            self.parameters_grad_buffer = torch.from_numpy(parameters_grad_buffer_array)
+            assert self.parameters_grad_buffer.is_pinned()
 
         fused_point_cloud = torch.tensor(np.asarray(pcd.points)).float().to("cuda")
         fused_point_cloud = fused_point_cloud.contiguous()
@@ -228,10 +229,11 @@ class GaussianModelCLMOffload(BaseGaussianModel):
         # Allocate pinned buffer
         parameters_buffer_array = numba.cuda.pinned_array((self.args.prealloc_capacity, 48), dtype=np.float32)
         self.parameters_buffer = torch.from_numpy(parameters_buffer_array)
-        parameters_grad_buffer_array = numba.cuda.pinned_array((self.args.prealloc_capacity, 48), dtype=np.float32)
-        self.parameters_grad_buffer = torch.from_numpy(parameters_grad_buffer_array)
         assert self.parameters_buffer.is_pinned()
-        assert self.parameters_grad_buffer.is_pinned()
+        if not self.only_for_rendering:
+            parameters_grad_buffer_array = numba.cuda.pinned_array((self.args.prealloc_capacity, 48), dtype=np.float32)
+            self.parameters_grad_buffer = torch.from_numpy(parameters_grad_buffer_array)
+            assert self.parameters_grad_buffer.is_pinned()
 
         # xyz, opacity, scaling, rotation on GPU
         self._xyz = nn.Parameter(_xyz.to("cuda").requires_grad_(True))
@@ -475,10 +477,12 @@ class GaussianModelCLMOffload(BaseGaussianModel):
 
         parameters_buffer_array = numba.cuda.pinned_array((self.args.prealloc_capacity, 48), dtype=np.float32)
         self.parameters_buffer = torch.from_numpy(parameters_buffer_array)
-        parameters_grad_buffer_array = numba.cuda.pinned_array((self.args.prealloc_capacity, 48), dtype=np.float32)
-        self.parameters_grad_buffer = torch.from_numpy(parameters_grad_buffer_array)
         assert self.parameters_buffer.is_pinned()
-        assert self.parameters_grad_buffer.is_pinned()
+        if not self.only_for_rendering:
+            parameters_grad_buffer_array = numba.cuda.pinned_array((self.args.prealloc_capacity, 48), dtype=np.float32)
+            self.parameters_grad_buffer = torch.from_numpy(parameters_grad_buffer_array)
+            assert self.parameters_grad_buffer.is_pinned()
+
         # self.parameters_buffer = torch.empty((self.args.prealloc_capacity, 48), dtype=torch.float, pin_memory=True)
         # self.parameters_grad_buffer = torch.zeros((self.args.prealloc_capacity, 48), dtype=torch.float, pin_memory=True)
 

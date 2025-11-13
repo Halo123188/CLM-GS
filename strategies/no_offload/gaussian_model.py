@@ -31,8 +31,8 @@ class GaussianModelNoOffload(BaseGaussianModel):
         """Return the device type for this model"""
         return "cuda"
 
-    def __init__(self, sh_degree: int):
-        super().__init__(sh_degree)
+    def __init__(self, sh_degree: int, only_for_rendering: bool = False):
+        super().__init__(sh_degree, only_for_rendering)
         self.sum_visible_count_in_one_batch = torch.empty(0)
 
     def capture(self):
