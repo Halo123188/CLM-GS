@@ -229,16 +229,6 @@ def order_calculation(filters, batched_cameras, n_gaussians, bsz, perm_generator
     torch.cuda.nvtx.range_pop()
 
     finish_indices_filters = update_ls_cpu
-    if args.delay_cpuadam_notaccessed_gs:
-        finish_indices_filters = list(finish_indices_filters)
-
-        filter_0 = finish_indices_filters[0] # a tensor
-        filter_last = finish_indices_filters[-1] # a tensor
-        
-        finish_indices_filters[0] = filter_0[:0] # empty tensor
-        finish_indices_filters[-1] = torch.cat([filter_last, filter_0], dim=0) # a tensor
-
-        finish_indices_filters = tuple(finish_indices_filters)
 
     assert len(finish_indices_filters) == bsz + 1, "len(finish_indices_filters) should be equal to bsz + 1"
     assert sum([len(indicies) for indicies in finish_indices_filters]) == n_gaussians, f"{sum([len(indicies) for indicies in finish_indices_filters])}, {n_gaussians}"
