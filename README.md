@@ -93,37 +93,6 @@ conda activate gaussian_splatting
 
 NOTES: We kept additional dependencies minimal compared to the original 3DGS. For environment setup issues, maybe you could refer to the [original 3DGS repo issue section](https://github.com/graphdeco-inria/gaussian-splatting/issues) first.
 
-# How to use CLM
-
-This repo contains advanced memory management implementations for single-GPU large-scale 3D Gaussian Splatting training. It is designed to complement the distributed multi-GPU training capabilities of the base Grendel-GS system.
-
-## Setup
-
-### Cloning the Repository
-
-The repository contains submodules, thus please check it out with 
-```shell
-git clone git@github.com:nyu-systems/Grendel-GS.git --recursive
-```
-
-### PyTorch Environment
-
-Ensure you have Conda, GPU with compatible driver and CUDA environment installed on your machine, as prerequisites. Then please install `PyTorch`, `Torchvision`, `Plyfile`, `tqdm` which are essential packages. 
-
-We provide a yml file for easy environment setup. However, you should choose the versions to match your local running environment. 
-```shell
-conda env create --file environment.yml
-conda activate gaussian_splatting
-```
-
-**Additional dependencies for CLM offloading**:
-- `numba` (for pinned memory allocation)
-- `fast-tsp` (for camera ordering optimization)
-- Custom CUDA kernels in `clm_kernels/` submodule
-
-NOTES: We kept additional dependencies minimal compared to the original 3DGS. For environment setup issues, maybe you could refer to the [original 3DGS repo issue section](https://github.com/graphdeco-inria/gaussian-splatting/issues) first.
-
-
 ## Training
 
 ### Basic Training with Different Strategies
