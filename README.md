@@ -99,18 +99,20 @@ NOTES: We kept additional dependencies minimal compared to the original 3DGS. Fo
 
 **No Offload (GPU-Only, for small scenes)**:
 ```shell
-python train.py -s <path to COLMAP dataset> --no_offload
+python train.py -s <path to COLMAP dataset> --no_offload --bsz 4
 ```
 
 **Naive Offload (Simple offloading for medium scenes)**:
 ```shell
-python train.py -s <path to COLMAP dataset> --naive_offload
+python train.py -s <path to COLMAP dataset> --naive_offload --bsz 4
 ```
 
 **CLM Offload (Recommended for large scenes)**:
 ```shell
-python train.py -s <path to COLMAP dataset> --clm_offload
+python train.py -s <path to COLMAP dataset> --clm_offload --bsz 4
 ```
+
+## Difference between these offloading strategies
 
 
 ### Advanced Options
@@ -133,7 +135,7 @@ This mode decodes JPG/PNG images into raw byte data when you first train on a da
 
 This mode avoids pre-decoding images, saving disk storage space. However, decoding images on the CPU before each rendering pass is slower and consumes additional CPU computation.
 
-#### **Capacity Pre-allocation**
+#### **Pre-allocate buffers for Gaussians on CPU RAM**
 
 For CLM offload mode, you can specify how many Gaussians to pre-allocate in CPU pinned memory:
 
@@ -146,15 +148,24 @@ python train.py -s <path to COLMAP dataset> \
 If you don't specify `--prealloc_capacity`, the system automatically calculates the maximum number of Gaussians your workstation can support:
 
 ```
-Number of Gaussians = (remaining CPU memory × 0.8) / (48 × 4 × 4 bytes)
+Number of Gaussians = (remaining CPU memory × 0.7) / (48 × 4 × 4 bytes)
 ```
 
 Where:
 - 48 = number of spherical harmonic coefficients offloaded to CPU RAM
 - First 4 = bytes per float32
 - Second 4 = storage multiplier (parameter + gradient + 2 optimizer states)
+- 0.7 is a conservative multiplier that reserves memory for other workloads. For more aggressive memory allocation, specify `--prealloc_capacity` explicitly.
 
-**Note**: `--prealloc_capacity` is only effective when `--clm_offload` is enabled. 
+**Note**: `--prealloc_capacity` is only effective when `--clm_offload` is enabled.
+
+#### **Microbatch Pipelining**
+
+This codebase uses microbatch pipelining with gradient accumulation. For each microbatch, we render one image and perform one backpropagation. The `--bsz` flag controls how many images to process before each optimizer step.
+
+This is design choice is important. Without microbatch pipelining, activation memory would grow linearly with batch size. With pipelining, activation memory remains constant at the level needed for rendering a single image.
+
+Learning rate and momentum are scaled according to Grendel-GS rules when increasing `--bsz`. Currently, `clm_offload` supports batch sizes of 4, 8, 16, 32, and 64. 
 
 
 <details>
@@ -172,6 +183,9 @@ Where:
   #### --prealloc_capacity
   Number of Gaussians to pre-allocate in CPU pinned memory (e.g., `40000000` for 40M). Required for CLM offload with densification.
  
+  #### --bsz
+  Batch size using micro-batch pipelining with gradient accumulation. `--bsz 4` renders and backpropagates 4 images sequentially before each optimizer step. Images are processed one-by-one rather than simultaneously to reduce activation memory usage. 
+
   #### All other arguments
   Please follow Gaussian Splatting's original codebase. 
 
@@ -181,7 +195,7 @@ Where:
 ## (FIXME) Choosing the Right Strategy
 
 
-## Considerations about the flags
+## (FIXME) Considerations about the flags
 
 ---
 
@@ -199,7 +213,7 @@ All experiments were conducted on:
 
 The Mip-NeRF 360 dataset provides standard benchmark scenes for evaluating quality and performance. While these scenes are small enough to fit in GPU memory, they serve as a baseline to verify that CLM offloading maintains quality while reducing memory usage.
 
-📖 **[Complete Mip360 Tutorial](release_scripts_v3/mip360_README.md)** - Includes dataset download, training commands, and reproduction instructions.
+📖 **[Complete Mip360 Tutorial](release_scripts_v3/mip360_README.md)**
 
 ---
 
@@ -207,7 +221,7 @@ The Mip-NeRF 360 dataset provides standard benchmark scenes for evaluating quali
 
 The MegaNeRF Rubble scene at 4K resolution represents a real-world large-scale outdoor scene that exceeds standard GPU memory capacity. This example demonstrates CLM's ability to train a real-world large-scale scene from scratch. 
 
-📖 **[Complete Rubble 4K Tutorial](release_scripts_v3/rubble4k_README.md)** - Includes dataset preparation, training configuration, and evaluation pipeline.
+📖 **[Complete Rubble 4K Tutorial](release_scripts_v3/rubble4k_README.md)**
 
 ---
 
@@ -215,7 +229,7 @@ The MegaNeRF Rubble scene at 4K resolution represents a real-world large-scale o
 
 The MatrixCity BigCity dataset represents the extreme upper bound of scene reconstruction with synthetic city-scale environments. This demonstrates CLM's capability to handle 100 million Gaussians. This serves as a stress test, requiring 128GB RAM and 24GB GPU memory to successfully train with 100 million Gaussians. 
 
-📖 **[Complete BigCity Tutorial](release_scripts_v3/bigcity_README.md)** - Includes dataset setup, training strategy, and large-scale reconstruction pipeline.
+📖 **[Complete BigCity Tutorial](release_scripts_v3/bigcity_README.md)**
 
 ---
 
