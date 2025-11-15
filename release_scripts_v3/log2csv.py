@@ -155,7 +155,7 @@ def extract_all_experiments_to_csv(folder_path, output_csv=None):
         else:
             print(f"Warning: Could not extract metrics from {subfolder}")
     
-    # Create DataFrame and save to CSV
+    # Create DataFrame and save to CSV and Markdown
     if results:
         df = pd.DataFrame(results)
         
@@ -175,8 +175,15 @@ def extract_all_experiments_to_csv(folder_path, output_csv=None):
         df = df.drop(columns=['_sort_key'])
         df = df.reset_index(drop=True)
         
+        # Save to CSV
         df.to_csv(output_csv, index=False)
         print(f"\nSuccessfully saved results to {output_csv}")
+        
+        # Save to Markdown
+        output_md = output_csv.replace('.csv', '.md')
+        df.to_markdown(output_md, index=False)
+        print(f"Successfully saved markdown table to {output_md}")
+        
         print(f"Processed {len(results)} experiments")
         print("\nPreview of results:")
         print(df.to_string())
