@@ -43,9 +43,9 @@ By using CLM offloading, your 3DGS training can:
 - **Work with existing rendering kernels**: We use off-the-shelf rendering kernels from gsplat. Our offloading design is orthogonal to these rendering kernels, making it easy to integrate with your own splatting pipelines
 
 This codebase provides three modes of memory-efficient training strategies for your reference:
-- **no_offload**: GPU-only training that optimizes memory usage on a single GPU. It also a baseline for the two offloadin modes below. (see `strategies/no_offload`)
-- **naive_offload**: A simple CPU offloading implementation that demonstrates the simplest offloading strategy, though it is slower (see `strategies/naive_offload`)
-- **clm_offload**: Our most sophisticated offloading design that reduces memory usage to the extreme while maintaining good speed. The code is more complex but highly efficient (see `strategies/clm_offload`) 
+- **no_offload**: 3DGS training only on GPU. We optimize memory usage with engineering tricks on a single GPU. This serves as a baseline for the two offloading modes below. (see `strategies/no_offload`)
+- **naive_offload**: A simple CPU offloading implementation that stores all Gaussian attributes (xyz, etc.) and their optimizer states on CPU, loads parameters onto GPU in each iteration, and offloads gradients back to CPU in each batch. This demonstrates the simplest offloading strategy, though it is slower. (see `strategies/naive_offload`)
+- **clm_offload**: Our most sophisticated offloading design that keeps selection-critical attributes on GPU while offloading others to CPU along with their optimizer states. It reduces memory usage to the extreme while maintaining good speed. The code is more complex but highly efficient. (see `strategies/clm_offload`) 
 
 We also provide multiple engineering-level memory-efficient optimizations: 
 - Store the dataset on disk and stream data on-demand to reduce RAM and GPU memory consumption. 
