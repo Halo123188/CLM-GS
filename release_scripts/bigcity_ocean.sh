@@ -64,7 +64,7 @@ fi
 expe_name="bigcity_${scale}_${offload_strategy}_${CAPACITY_DESC}"
 
 # Set output paths
-log_folder="output/bigcity/${TIMESTAMP}_${expe_name}"
+log_folder="output/bigcity_ocean/${TIMESTAMP}_${expe_name}"
 model_path=${log_folder}
 
 echo "Output folder: $log_folder"
@@ -155,10 +155,10 @@ python train.py \
     ${MONITOR_OPTS} \
     --eval \
     --save_tensors \
+    --num_save_images_during_eval 10 \
     --max_num_images_to_evaluate 200 \
-    --initial_point_cloud_downsampled_ratio ${PC_DOWNSAMPLE_RATIO}
-
-# --num_save_images_during_eval 10 \
+    --initial_point_cloud_downsampled_ratio ${PC_DOWNSAMPLE_RATIO} \
+    --matrixcity_ocean_mask
 
 # save_tensors is very important for matrixcity. 
 
