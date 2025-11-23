@@ -119,3 +119,4 @@ The `clm_offload` strategy demonstrates significant memory efficiency while main
 
 ## Reference
 
+Li, Yixuan et al. *MatrixCity: A Large-scale City Dataset for City-scale Neural Rendering and Beyond*. ICCV, 2023.

@@ -111,3 +111,5 @@ Note: The rubble4k_28M_no_offload experiment runs out of memory (OOM) because a 
 | rubble4k_28M_no_offload    | OOM         | OOM          | OOM        | OOM                   | OOM                      | OOM                 |
 
 ## Reference
+
+Turki, Haithem et al. *Mega-NeRF: Scalable Construction of Large-Scale NeRFs for Virtual Fly-Throughs*. CVPR, 2022.
