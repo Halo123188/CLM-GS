@@ -6,4 +6,3 @@ __all__ = [
     "baseline_accumGrads_impl",
     "baseline_accumGrads_micro_step",
 ]
-

@@ -32,23 +32,36 @@ class GaussianModelCLMOffload(BaseGaussianModel):
     def _get_device(self):
         return "cuda"
 
-    def create_from_pcd(self, pcd: BasicPointCloud, spatial_lr_scale: float, subsample_ratio: float = 1.0):
+    def create_from_pcd(
+        self,
+        pcd: BasicPointCloud,
+        spatial_lr_scale: float,
+        subsample_ratio: float = 1.0,
+    ):
         log_file = utils.get_log_file()
         self.spatial_lr_scale = spatial_lr_scale
 
         # Allocate pinned buffers for features
-        parameters_buffer_array = numba.cuda.pinned_array((self.args.prealloc_capacity, 48), dtype=np.float32)
+        parameters_buffer_array = numba.cuda.pinned_array(
+            (self.args.prealloc_capacity, 48), dtype=np.float32
+        )
         self.parameters_buffer = torch.from_numpy(parameters_buffer_array)
         assert self.parameters_buffer.is_pinned()
         if not self.only_for_rendering:
-            parameters_grad_buffer_array = numba.cuda.pinned_array((self.args.prealloc_capacity, 48), dtype=np.float32)
+            parameters_grad_buffer_array = numba.cuda.pinned_array(
+                (self.args.prealloc_capacity, 48), dtype=np.float32
+            )
             self.parameters_grad_buffer = torch.from_numpy(parameters_grad_buffer_array)
             assert self.parameters_grad_buffer.is_pinned()
 
         fused_point_cloud = torch.tensor(np.asarray(pcd.points)).float().to("cuda")
         fused_point_cloud = fused_point_cloud.contiguous()
         fused_color = RGB2SH(torch.tensor(np.asarray(pcd.colors)).float().to("cpu"))
-        features = torch.zeros((fused_color.shape[0], 3, (self.max_sh_degree + 1) ** 2)).float().to("cpu")
+        features = (
+            torch.zeros((fused_color.shape[0], 3, (self.max_sh_degree + 1) ** 2))
+            .float()
+            .to("cpu")
+        )
         features[:, :3, 0] = fused_color
         features[:, 3:, 1:] = 0.0
 
@@ -79,26 +92,34 @@ class GaussianModelCLMOffload(BaseGaussianModel):
         rots = torch.zeros((N, 4), device="cuda")
         rots[:, 0] = 1
 
-        opacities = inverse_sigmoid(0.1 * torch.ones((N, 1), dtype=torch.float, device="cuda"))
-        
+        opacities = inverse_sigmoid(
+            0.1 * torch.ones((N, 1), dtype=torch.float, device="cuda")
+        )
+
         # xyz, opacity, scaling, rotation on GPU
         self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
         self._scaling = nn.Parameter(scales.requires_grad_(True))
         self._rotation = nn.Parameter(rots.requires_grad_(True))
         self._opacity = nn.Parameter(opacities.requires_grad_(True))
-        
+
         # features in CPU pinned memory as concatenated parameter
-        features_dc = features[:, :, 0:1].transpose(1, 2).contiguous().view(N, -1)  # (N, 1, 3) -> (N, 3)
-        features_rest = features[:, :, 1:].transpose(1, 2).contiguous().view(N, -1)  # (N, 15, 3) -> (N, 45)
+        features_dc = (
+            features[:, :, 0:1].transpose(1, 2).contiguous().view(N, -1)
+        )  # (N, 1, 3) -> (N, 3)
+        features_rest = (
+            features[:, :, 1:].transpose(1, 2).contiguous().view(N, -1)
+        )  # (N, 15, 3) -> (N, 45)
         dims = [features_dc.shape[1], features_rest.shape[1]]
         torch.cat((features_dc, features_rest), dim=1, out=self.parameters_buffer[:N])
-        
+
         self._parameters = nn.Parameter(self.parameters_buffer[:N].requires_grad_(True))
-        self._features_dc, self._features_rest = torch.split(self._parameters, dims, dim=1) 
+        self._features_dc, self._features_rest = torch.split(
+            self._parameters, dims, dim=1
+        )
         self.max_radii2D = torch.zeros((N), device="cuda")
         self.sum_visible_count_in_one_batch = torch.zeros((N), device="cuda")
-        
-        self.param_dims = torch.tensor(dims, dtype=torch.int, device='cuda')
+
+        self.param_dims = torch.tensor(dims, dtype=torch.int, device="cuda")
 
     def all_parameters(self):
         return [
@@ -111,12 +132,14 @@ class GaussianModelCLMOffload(BaseGaussianModel):
 
     def training_setup(self, training_args):
         self.percent_dense = training_args.percent_dense
-        self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device=self.device)
+        self.xyz_gradient_accum = torch.zeros(
+            (self.get_xyz.shape[0], 1), device=self.device
+        )
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device=self.device)
 
         args = utils.get_args()
         log_file = utils.get_log_file()
-        
+
         l = [
             {
                 "params": [self._xyz],
@@ -141,22 +164,20 @@ class GaussianModelCLMOffload(BaseGaussianModel):
                 "name": "rotation",
             },
             {
-                "params": [self._parameters], # concatenated shs
+                "params": [self._parameters],  # concatenated shs
                 "lr": training_args.feature_lr,
-                "name": "parameters"
+                "name": "parameters",
             },
         ]
         column_sizes = [3, 45]
-        column_lrs = [
-            training_args.feature_lr,
-            training_args.feature_lr / 20.0]
-        
+        column_lrs = [training_args.feature_lr, training_args.feature_lr / 20.0]
+
         self.optimizer = UnifiedAdam(
             l,
             column_sizes,
             column_lrs,
             lr=0.0,
-            bias_correction=True, # This True is required. 
+            bias_correction=True,  # This True is required.
             betas=(0.9, 0.999),
             eps=1e-15,
             weight_decay=0,
@@ -166,7 +187,6 @@ class GaussianModelCLMOffload(BaseGaussianModel):
             fused=True,
             sparse=self.args.sparse_adam,
         )
-                
 
         # Scale learning rates according to bsz.
         bsz = args.bsz
@@ -189,7 +209,9 @@ class GaussianModelCLMOffload(BaseGaussianModel):
             elif training_args.lr_scale_mode == "accumu":
                 lr_scale = 1
             else:
-                assert False, f"lr_scale_mode {training_args.lr_scale_mode} not supported."
+                assert (
+                    False
+                ), f"lr_scale_mode {training_args.lr_scale_mode} not supported."
 
         # Update columns_lr for UnifiedAdam
         if training_args.lr_scale_mode == "linear":
@@ -233,20 +255,32 @@ class GaussianModelCLMOffload(BaseGaussianModel):
 
     def load_tensors(self, parent_path):
         _xyz = torch.load(os.path.join(parent_path, "xyz.pt"), map_location="cpu")
-        _opacity = torch.load(os.path.join(parent_path, "opacity.pt"), map_location="cpu")
-        _scaling = torch.load(os.path.join(parent_path, "scaling.pt"), map_location="cpu")
-        _rotation = torch.load(os.path.join(parent_path, "rotation.pt"), map_location="cpu")
-        _features = torch.load(os.path.join(parent_path, "parameters.pt"), map_location="cpu")
+        _opacity = torch.load(
+            os.path.join(parent_path, "opacity.pt"), map_location="cpu"
+        )
+        _scaling = torch.load(
+            os.path.join(parent_path, "scaling.pt"), map_location="cpu"
+        )
+        _rotation = torch.load(
+            os.path.join(parent_path, "rotation.pt"), map_location="cpu"
+        )
+        _features = torch.load(
+            os.path.join(parent_path, "parameters.pt"), map_location="cpu"
+        )
 
         N = _xyz.shape[0]
         print("Number of points before initialization : ", N)
 
         # Allocate pinned buffer
-        parameters_buffer_array = numba.cuda.pinned_array((self.args.prealloc_capacity, 48), dtype=np.float32)
+        parameters_buffer_array = numba.cuda.pinned_array(
+            (self.args.prealloc_capacity, 48), dtype=np.float32
+        )
         self.parameters_buffer = torch.from_numpy(parameters_buffer_array)
         assert self.parameters_buffer.is_pinned()
         if not self.only_for_rendering:
-            parameters_grad_buffer_array = numba.cuda.pinned_array((self.args.prealloc_capacity, 48), dtype=np.float32)
+            parameters_grad_buffer_array = numba.cuda.pinned_array(
+                (self.args.prealloc_capacity, 48), dtype=np.float32
+            )
             self.parameters_grad_buffer = torch.from_numpy(parameters_grad_buffer_array)
             assert self.parameters_grad_buffer.is_pinned()
 
@@ -255,18 +289,18 @@ class GaussianModelCLMOffload(BaseGaussianModel):
         self._opacity = nn.Parameter(_opacity.to("cuda").requires_grad_(True))
         self._scaling = nn.Parameter(_scaling.to("cuda").requires_grad_(True))
         self._rotation = nn.Parameter(_rotation.to("cuda").requires_grad_(True))
-        
+
         # features in pinned memory
         self.parameters_buffer[:N].copy_(_features)
         self._parameters = nn.Parameter(self.parameters_buffer[:N].requires_grad_(True))
-        self._features_dc, self._features_rest = torch.split(self._parameters, [3, 45], dim=1)
+        self._features_dc, self._features_rest = torch.split(
+            self._parameters, [3, 45], dim=1
+        )
 
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
         self.active_sh_degree = self.max_sh_degree
 
-    def save_sub_plys(
-        self, path, n_split, split_size
-    ):
+    def save_sub_plys(self, path, n_split, split_size):
         args = utils.get_args()
         _xyz = _features_dc = _features_rest = _opacity = _scaling = _rotation = None
         utils.log_cpu_memory_usage("start save_ply")
@@ -280,13 +314,8 @@ class GaussianModelCLMOffload(BaseGaussianModel):
         for i in range(n_split):
             assert path.endswith(".ply")
             this_path = (
-                path[:-4]
-                + "_rk"
-                + str(i)
-                + "_ws"
-                + str(n_split)
-                + ".ply"
-            ) # TODO: modify the file_name.
+                path[:-4] + "_rk" + str(i) + "_ws" + str(n_split) + ".ply"
+            )  # TODO: modify the file_name.
             mkdir_p(os.path.dirname(this_path))
 
             start = i * split_size
@@ -318,7 +347,9 @@ class GaussianModelCLMOffload(BaseGaussianModel):
             scale = _scaling.detach()[start:end].cpu().numpy()
             rotation = _rotation.detach()[start:end].cpu().numpy()
 
-            utils.log_cpu_memory_usage(f"[{i/n_split}] after change gpu tensor to cpu numpy")
+            utils.log_cpu_memory_usage(
+                f"[{i/n_split}] after change gpu tensor to cpu numpy"
+            )
 
             dtype_full = [
                 (attribute, "f4") for attribute in self.construct_list_of_attributes()
@@ -336,7 +367,7 @@ class GaussianModelCLMOffload(BaseGaussianModel):
                 f"[{i/n_split}] after change numpy to plyelement before writing ply file"
             )
             PlyData([el]).write(this_path)
-               
+
         utils.log_cpu_memory_usage("finish write ply file")
         # remark: max_radii2D, xyz_gradient_accum and denom are not saved here; they are save elsewhere.
 
@@ -347,7 +378,7 @@ class GaussianModelCLMOffload(BaseGaussianModel):
         # Single GPU mode - no distribution logic needed
         _xyz = _features_dc = _features_rest = _opacity = _scaling = _rotation = None
         utils.log_cpu_memory_usage("start save_ply")
-        
+
         # Directly use local tensors
         _xyz = self._xyz
         _features_dc = self._features_dc
@@ -472,7 +503,9 @@ class GaussianModelCLMOffload(BaseGaussianModel):
 
     def one_file_load_ply(self, folder):
         path = os.path.join(folder, "point_cloud.ply")
-        xyz, features_dc, features_extra, opacities, scales, rots = self.load_raw_ply(path)
+        xyz, features_dc, features_extra, opacities, scales, rots = self.load_raw_ply(
+            path
+        )
         N = xyz.shape[0]
 
         _xyz = torch.from_numpy(xyz)
@@ -490,11 +523,15 @@ class GaussianModelCLMOffload(BaseGaussianModel):
         if _features_rest.ndim == 3:
             _features_rest = _features_rest.permute(0, 2, 1).reshape(N, -1)
 
-        parameters_buffer_array = numba.cuda.pinned_array((self.args.prealloc_capacity, 48), dtype=np.float32)
+        parameters_buffer_array = numba.cuda.pinned_array(
+            (self.args.prealloc_capacity, 48), dtype=np.float32
+        )
         self.parameters_buffer = torch.from_numpy(parameters_buffer_array)
         assert self.parameters_buffer.is_pinned()
         if not self.only_for_rendering:
-            parameters_grad_buffer_array = numba.cuda.pinned_array((self.args.prealloc_capacity, 48), dtype=np.float32)
+            parameters_grad_buffer_array = numba.cuda.pinned_array(
+                (self.args.prealloc_capacity, 48), dtype=np.float32
+            )
             self.parameters_grad_buffer = torch.from_numpy(parameters_grad_buffer_array)
             assert self.parameters_grad_buffer.is_pinned()
 
@@ -503,9 +540,7 @@ class GaussianModelCLMOffload(BaseGaussianModel):
 
         self.parameters_buffer[:N] = torch.cat((_features_dc, _features_rest), dim=1)
 
-        self._parameters = nn.Parameter(
-            self.parameters_buffer[:N].requires_grad_(True)
-        )
+        self._parameters = nn.Parameter(self.parameters_buffer[:N].requires_grad_(True))
 
         self._xyz = nn.Parameter(
             _xyz.to(torch.float).to(self.device).requires_grad_(True)
@@ -530,22 +565,28 @@ class GaussianModelCLMOffload(BaseGaussianModel):
         opacities_new = inverse_sigmoid(
             torch.min(self.get_opacity, torch.ones_like(self.get_opacity) * 0.01)
         )
-        optimizable_tensors = self.replace_tensor_to_unified_adam(opacities_new, "opacity")
+        optimizable_tensors = self.replace_tensor_to_unified_adam(
+            opacities_new, "opacity"
+        )
         self._opacity = optimizable_tensors["opacity"]
 
     def replace_tensor_to_unified_adam(self, tensor, name):
         optimizable_tensors = {}
         for group in self.optimizer.param_groups:
             if group["name"] == name:
-                assert group["params"][0].is_cuda, "Not implemented for parameters on cpu yet."
-                stored_state = self.optimizer.gpu_adam.state.get(group["params"][0], None)
+                assert group["params"][
+                    0
+                ].is_cuda, "Not implemented for parameters on cpu yet."
+                stored_state = self.optimizer.gpu_adam.state.get(
+                    group["params"][0], None
+                )
                 assert stored_state is not None, "UnifiedAdam is a stateful optimizer."
                 if "exp_avg" not in stored_state:
                     stored_state["momentum_buffer"] = torch.zeros_like(tensor)
                 else:
                     stored_state["exp_avg"] = torch.zeros_like(tensor)
                     stored_state["exp_avg_sq"] = torch.zeros_like(tensor)
-                
+
                 del self.optimizer.gpu_adam.state[group["params"][0]]
                 group["params"][0] = nn.Parameter(tensor.requires_grad_(True))
                 self.optimizer.gpu_adam.state[group["params"][0]] = stored_state
@@ -557,30 +598,40 @@ class GaussianModelCLMOffload(BaseGaussianModel):
         optimizable_tensors = {}
         for group in self.optimizer.param_groups:
             if group["params"][0].is_cuda:
-                stored_state = self.optimizer.gpu_adam.state.get(group["params"][0], None)
+                stored_state = self.optimizer.gpu_adam.state.get(
+                    group["params"][0], None
+                )
                 mask = mask.to(group["params"][0].device.type)
                 assert stored_state is not None, "Unified adam is a stateful optimizer."
 
                 if "exp_avg" not in stored_state:
-                    stored_state["momentum_buffer"] = stored_state["momentum_buffer"][mask]
+                    stored_state["momentum_buffer"] = stored_state["momentum_buffer"][
+                        mask
+                    ]
                 else:
                     stored_state["exp_avg"] = stored_state["exp_avg"][mask]
                     stored_state["exp_avg_sq"] = stored_state["exp_avg_sq"][mask]
 
                 del self.optimizer.gpu_adam.state[group["params"][0]]
 
-                group["params"][0] = nn.Parameter((group["params"][0][mask].requires_grad_(True)))
+                group["params"][0] = nn.Parameter(
+                    (group["params"][0][mask].requires_grad_(True))
+                )
 
                 self.optimizer.gpu_adam.state[group["params"][0]] = stored_state
                 optimizable_tensors[group["name"]] = group["params"][0]
-            
+
             else:
-                stored_state = self.optimizer.cpu_adam.state.get(group["params"][0], None)
+                stored_state = self.optimizer.cpu_adam.state.get(
+                    group["params"][0], None
+                )
                 mask = mask.to(group["params"][0].device.type)
                 assert stored_state is not None, "Unified adam is a stateful optimizer."
 
                 if "exp_avg" not in stored_state:
-                    stored_state["momentum_buffer"] = stored_state["momentum_buffer"][mask]
+                    stored_state["momentum_buffer"] = stored_state["momentum_buffer"][
+                        mask
+                    ]
                 else:
                     stored_state["exp_avg"] = stored_state["exp_avg"][mask]
                     stored_state["exp_avg_sq"] = stored_state["exp_avg_sq"][mask]
@@ -588,29 +639,33 @@ class GaussianModelCLMOffload(BaseGaussianModel):
                 del self.optimizer.cpu_adam.state[group["params"][0]]
 
                 assert mask.dim() == 1
-                self.parameters_buffer[:torch.sum(mask)] = group["params"][0][mask]
+                self.parameters_buffer[: torch.sum(mask)] = group["params"][0][mask]
                 group["params"][0] = nn.Parameter(
-                    (self.parameters_buffer[:torch.sum(mask)].requires_grad_(True))
+                    (self.parameters_buffer[: torch.sum(mask)].requires_grad_(True))
                 )
 
                 self.optimizer.cpu_adam.state[group["params"][0]] = stored_state
                 optimizable_tensors[group["name"]] = group["params"][0]
 
-        self.optimizer.state = self.optimizer.gpu_adam.state | self.optimizer.cpu_adam.state   
+        self.optimizer.state = (
+            self.optimizer.gpu_adam.state | self.optimizer.cpu_adam.state
+        )
         return optimizable_tensors
 
     def prune_points(self, mask):
         valid_points_mask = ~mask
         optimizable_tensors = self._prune_unified_adam(valid_points_mask)
-        
+
         self._xyz = optimizable_tensors["xyz"]
         self._opacity = optimizable_tensors["opacity"]
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
         self._parameters = optimizable_tensors["parameters"]
-        dims = [3, 45]           
-        self._features_dc, self._features_rest = torch.split(self._parameters, dims, dim=1)
-        
+        dims = [3, 45]
+        self._features_dc, self._features_rest = torch.split(
+            self._parameters, dims, dim=1
+        )
+
         assert self._xyz.is_cuda
         assert self._opacity.is_cuda
         assert self._scaling.is_cuda
@@ -622,7 +677,9 @@ class GaussianModelCLMOffload(BaseGaussianModel):
         self.xyz_gradient_accum = self.xyz_gradient_accum[valid_points_mask]
         self.denom = self.denom[valid_points_mask]
         self.max_radii2D = self.max_radii2D[valid_points_mask]
-        self.sum_visible_count_in_one_batch = self.sum_visible_count_in_one_batch[valid_points_mask]
+        self.sum_visible_count_in_one_batch = self.sum_visible_count_in_one_batch[
+            valid_points_mask
+        ]
 
     def cat_tensors_to_unified_adam(self, tensors_dict):
         optimizable_tensors = {}
@@ -633,13 +690,18 @@ class GaussianModelCLMOffload(BaseGaussianModel):
             extension_tensor = tensors_dict[group["name"]]
 
             if group["params"][0].is_cuda:
-                stored_state = self.optimizer.gpu_adam.state.get(group["params"][0], None)
+                stored_state = self.optimizer.gpu_adam.state.get(
+                    group["params"][0], None
+                )
 
                 assert stored_state is not None, "Unified adam is a stateful optimizer."
                 # Update optimizer states.
                 if "exp_avg" not in stored_state:
                     stored_state["momentum_buffer"] = torch.cat(
-                        (stored_state["momentum_buffer"], torch.zeros_like(extension_tensor)),
+                        (
+                            stored_state["momentum_buffer"],
+                            torch.zeros_like(extension_tensor),
+                        ),
                         dim=0,
                     )
                 else:
@@ -648,27 +710,37 @@ class GaussianModelCLMOffload(BaseGaussianModel):
                         dim=0,
                     )
                     stored_state["exp_avg_sq"] = torch.cat(
-                        (stored_state["exp_avg_sq"], torch.zeros_like(extension_tensor)),
+                        (
+                            stored_state["exp_avg_sq"],
+                            torch.zeros_like(extension_tensor),
+                        ),
                         dim=0,
                     )
 
                 del self.optimizer.gpu_adam.state[group["params"][0]]
-                
+
                 # Update parameters.
                 group["params"][0] = nn.Parameter(
-                    torch.cat((group["params"][0], extension_tensor), dim=0).requires_grad_(True)
+                    torch.cat(
+                        (group["params"][0], extension_tensor), dim=0
+                    ).requires_grad_(True)
                 )
                 self.optimizer.gpu_adam.state[group["params"][0]] = stored_state
                 optimizable_tensors[group["name"]] = group["params"][0]
-            
+
             else:
-                stored_state = self.optimizer.cpu_adam.state.get(group["params"][0], None)
+                stored_state = self.optimizer.cpu_adam.state.get(
+                    group["params"][0], None
+                )
 
                 assert stored_state is not None, "Unified adam is a stateful optimizer."
                 # Update optimizer states.
                 if "exp_avg" not in stored_state:
                     stored_state["momentum_buffer"] = torch.cat(
-                        (stored_state["momentum_buffer"], torch.zeros_like(extension_tensor)),
+                        (
+                            stored_state["momentum_buffer"],
+                            torch.zeros_like(extension_tensor),
+                        ),
                         dim=0,
                     )
                 else:
@@ -677,23 +749,28 @@ class GaussianModelCLMOffload(BaseGaussianModel):
                         dim=0,
                     )
                     stored_state["exp_avg_sq"] = torch.cat(
-                        (stored_state["exp_avg_sq"], torch.zeros_like(extension_tensor)),
+                        (
+                            stored_state["exp_avg_sq"],
+                            torch.zeros_like(extension_tensor),
+                        ),
                         dim=0,
                     )
 
                 del self.optimizer.cpu_adam.state[group["params"][0]]
-                
+
                 # Update parameters.
                 N = group["params"][0].shape[0]
                 N_ext = extension_tensor.shape[0]
-                self.parameters_buffer[N:(N + N_ext)] = extension_tensor
+                self.parameters_buffer[N : (N + N_ext)] = extension_tensor
                 group["params"][0] = nn.Parameter(
-                    self.parameters_buffer[:(N + N_ext)].requires_grad_(True)
+                    self.parameters_buffer[: (N + N_ext)].requires_grad_(True)
                 )
                 self.optimizer.cpu_adam.state[group["params"][0]] = stored_state
                 optimizable_tensors[group["name"]] = group["params"][0]
 
-        self.optimizer.state = self.optimizer.gpu_adam.state | self.optimizer.cpu_adam.state
+        self.optimizer.state = (
+            self.optimizer.gpu_adam.state | self.optimizer.cpu_adam.state
+        )
         return optimizable_tensors
 
     def densification_postfix(
@@ -716,15 +793,17 @@ class GaussianModelCLMOffload(BaseGaussianModel):
             "parameters": new_parameters,
         }
         optimizable_tensors = self.cat_tensors_to_unified_adam(d)
-        
+
         self._xyz = optimizable_tensors["xyz"]
         self._opacity = optimizable_tensors["opacity"]
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
         self._parameters = optimizable_tensors["parameters"]
-        dims = [3, 45]           
-        self._features_dc, self._features_rest = torch.split(self._parameters, dims, dim=1)
-        
+        dims = [3, 45]
+        self._features_dc, self._features_rest = torch.split(
+            self._parameters, dims, dim=1
+        )
+
         assert self._xyz.is_cuda
         assert self._opacity.is_cuda
         assert self._scaling.is_cuda
@@ -733,10 +812,14 @@ class GaussianModelCLMOffload(BaseGaussianModel):
         assert self._features_dc.is_pinned()
         assert self._features_rest.is_pinned()
 
-        self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device=self.device)
+        self.xyz_gradient_accum = torch.zeros(
+            (self.get_xyz.shape[0], 1), device=self.device
+        )
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device=self.device)
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device=self.device)
-        self.sum_visible_count_in_one_batch = torch.zeros((self.get_xyz.shape[0]), device=self.device)
+        self.sum_visible_count_in_one_batch = torch.zeros(
+            (self.get_xyz.shape[0]), device=self.device
+        )
 
     def densify_and_split(self, grads, grad_threshold, scene_extent, N=2):
         n_init_points = self.get_xyz.shape[0]
@@ -746,7 +829,8 @@ class GaussianModelCLMOffload(BaseGaussianModel):
         selected_pts_mask = torch.where(padded_grad >= grad_threshold, True, False)
         selected_pts_mask = torch.logical_and(
             selected_pts_mask,
-            torch.max(self.get_scaling, dim=1).values > self.percent_dense * scene_extent,
+            torch.max(self.get_scaling, dim=1).values
+            > self.percent_dense * scene_extent,
         )
 
         stds = self.get_scaling[selected_pts_mask].repeat(N, 1)
@@ -759,7 +843,9 @@ class GaussianModelCLMOffload(BaseGaussianModel):
 
         selected_pts_mask_cpu = selected_pts_mask.cpu()
         rots = build_rotation(self._rotation[selected_pts_mask]).repeat(N, 1, 1)
-        new_xyz = torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1) + self.get_xyz[selected_pts_mask].repeat(N, 1)
+        new_xyz = torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1) + self.get_xyz[
+            selected_pts_mask
+        ].repeat(N, 1)
         new_scaling = self.scaling_inverse_activation(
             self.get_scaling[selected_pts_mask].repeat(N, 1) / (0.8 * N)
         )
@@ -780,7 +866,9 @@ class GaussianModelCLMOffload(BaseGaussianModel):
         prune_filter = torch.cat(
             (
                 selected_pts_mask,
-                torch.zeros(N * selected_pts_mask.sum(), device=self.device, dtype=bool),
+                torch.zeros(
+                    N * selected_pts_mask.sum(), device=self.device, dtype=bool
+                ),
             )
         )
         self.prune_points(prune_filter)
@@ -792,7 +880,8 @@ class GaussianModelCLMOffload(BaseGaussianModel):
         )
         selected_pts_mask = torch.logical_and(
             selected_pts_mask,
-            torch.max(self.get_scaling, dim=1).values <= self.percent_dense * scene_extent,
+            torch.max(self.get_scaling, dim=1).values
+            <= self.percent_dense * scene_extent,
         )
 
         utils.get_log_file().write(
@@ -817,7 +906,12 @@ class GaussianModelCLMOffload(BaseGaussianModel):
         )
 
     def gsplat_add_densification_stats_exact_filter(
-        self, viewspace_point_tensor_grad, radii, send2gpu_final_filter_indices, width, height
+        self,
+        viewspace_point_tensor_grad,
+        radii,
+        send2gpu_final_filter_indices,
+        width,
+        height,
     ):
         self.max_radii2D[send2gpu_final_filter_indices] = torch.max(
             self.max_radii2D[send2gpu_final_filter_indices], radii

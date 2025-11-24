@@ -2,6 +2,7 @@ import torch
 import cpu_adam
 from clm_kernels import selective_adam_update
 
+
 class SelectiveAdam(torch.optim.Adam):
     """
     A custom optimizer that extends the standard Adam optimizer by
@@ -84,12 +85,14 @@ class SelectiveAdam(torch.optim.Adam):
                 eps,
                 N,
                 M,
-            )  
+            )
+
 
 class UnifiedAdam(torch.optim.Optimizer):
     """Provide a unified interface for two independent Adam optimizers
     on both GPU and CPU.
     """
+
     def __init__(
         self,
         params,
@@ -98,7 +101,7 @@ class UnifiedAdam(torch.optim.Optimizer):
         lr=1e-3,
         bias_correction=True,
         betas=(0.9, 0.999),
-        eps=1e-15, #NOTE: Adam default eps is 1e-8. It's our intent to use 1e-15 in 3DGS.  
+        eps=1e-15,  # NOTE: Adam default eps is 1e-8. It's our intent to use 1e-15 in 3DGS.
         weight_decay=0,
         amsgrad=False,
         adamw_mode=False,
@@ -106,10 +109,10 @@ class UnifiedAdam(torch.optim.Optimizer):
         fused=False,
         sparse=False,
     ):
-        
+
         params_device = []
         params_host = []
-        
+
         for p in params:
             if p["name"] == "parameters":
                 assert p["params"][0].is_pinned()
@@ -121,7 +124,9 @@ class UnifiedAdam(torch.optim.Optimizer):
         if sparse:
             self.gpu_adam = SelectiveAdam(params_device, eps=eps, betas=betas)
         else:
-            self.gpu_adam = torch.optim.Adam(params_device, lr=0.0, eps=eps, fused=fused)
+            self.gpu_adam = torch.optim.Adam(
+                params_device, lr=0.0, eps=eps, fused=fused
+            )
         self.cpu_adam = cpu_adam.FusedCPUAdam(
             params_host,
             columns_sizes=columns_sizes,
@@ -133,11 +138,11 @@ class UnifiedAdam(torch.optim.Optimizer):
             weight_decay=weight_decay,
             amsgrad=amsgrad,
             adamw_mode=adamw_mode,
-            fp32_optimizer_states=fp32_optimizer_states
+            fp32_optimizer_states=fp32_optimizer_states,
         )
-        
+
         self.columns_lr = self.cpu_adam.columns_lr
-        
+
         defaults = dict(
             lr=lr,
             bias_correction=bias_correction,
@@ -146,35 +151,34 @@ class UnifiedAdam(torch.optim.Optimizer):
             weight_decay=weight_decay,
             amsgrad=amsgrad,
             adamw_mode=adamw_mode,
-            fp32_optimizer_states=fp32_optimizer_states
+            fp32_optimizer_states=fp32_optimizer_states,
         )
-        
+
         # super(UnifiedAdam, self).__init__(params, defaults)  # -> not root cause of nan bug
         self.param_groups = self.gpu_adam.param_groups + self.cpu_adam.param_groups
-        self.state = self.gpu_adam.state | self.cpu_adam.state #NOTE: This works but is weird: optimizer.states will be on both host & device
-        
+        self.state = (
+            self.gpu_adam.state | self.cpu_adam.state
+        )  # NOTE: This works but is weird: optimizer.states will be on both host & device
+
         # self.param_groups = self.gpu_adam.param_groups + self.cpu_adam.param_groups
-    
-        
+
     # def __setstate__(self, state):
-    #     super(UnifiedAdam, self).__setstate__(state)     
-    
+    #     super(UnifiedAdam, self).__setstate__(state)
+
     # def _init_group(self):
     #     pass
-    
+
     # def __del__(self):
     #     self.cpu_adam.__del__()
-    
+
     def get_all_states(self):
         return [self.gpu_adam.state, self.cpu_adam.state]
-    
+
     def zero_grad(self, set_to_none=False):
         self.gpu_adam.zero_grad(set_to_none)
         self.cpu_adam.zero_grad(set_to_none)
-    
+
     def step(self, closure=None):
         self.gpu_adam.step()
         self.cpu_adam.step()
         self.state = self.gpu_adam.state | self.cpu_adam.state
-        
-        

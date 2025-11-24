@@ -71,27 +71,44 @@ def loadCam(args, id, cam_info, decompressed_image=None, return_image=False):
         uid=id,
     )
 
+
 def loadCam_raw_from_disk(args, id, cam_info, to_gpu=False):
     # orig_w, orig_h = cam_info.width, cam_info.height
     # assert (
     #     orig_w == utils.get_img_width() and orig_h == utils.get_img_height()
     # ), "All images should have the same size. "
     orig_h, orig_w = utils.get_img_size()
-    
+
     # Get dececoded gt_image from disk
     try:
-        with open(os.path.join(args.decode_dataset_path, 'dataset_raw', (cam_info.image_name.lstrip('/') + '.raw')), 'rb') as raw_file:
+        with open(
+            os.path.join(
+                args.decode_dataset_path,
+                "dataset_raw",
+                (cam_info.image_name.lstrip("/") + ".raw"),
+            ),
+            "rb",
+        ) as raw_file:
             raw_data = raw_file.read()
     except RuntimeError as e:
         raise RuntimeError(e)
 
     raw_np = np.frombuffer(raw_data, dtype=np.uint8)
     if to_gpu:
-        image_tensor_host = torch.tensor(raw_np, dtype=torch.uint8).view(orig_h, orig_w, -1).permute(2, 0, 1).pin_memory()
-        image_tensor = image_tensor_host.to('cuda')
+        image_tensor_host = (
+            torch.tensor(raw_np, dtype=torch.uint8)
+            .view(orig_h, orig_w, -1)
+            .permute(2, 0, 1)
+            .pin_memory()
+        )
+        image_tensor = image_tensor_host.to("cuda")
     else:
-        image_tensor = torch.tensor(raw_np, dtype=torch.uint8).view(orig_h, orig_w, -1).permute(2, 0, 1)
-    
+        image_tensor = (
+            torch.tensor(raw_np, dtype=torch.uint8)
+            .view(orig_h, orig_w, -1)
+            .permute(2, 0, 1)
+        )
+
     # assert image_tensor.shape[0] == 3, image_tensor.shape[0]
     image_tensor = image_tensor[:3, ...].contiguous()
 
@@ -107,6 +124,7 @@ def loadCam_raw_from_disk(args, id, cam_info, to_gpu=False):
         uid=id,
         offload=True,
     )
+
 
 def load_decompressed_image(params):
     args, id, cam_info = params
@@ -230,16 +248,23 @@ def decompressed_images_from_camInfos_multiprocess_sharedmem(
 
     return decompressed_images
 
+
 def _process_single_image_for_predecode(params):
     """Helper function to process a single image for predecoding (used by multiprocessing)"""
     cam_info, decode_dataset_path, orig_w, orig_h = params
     try:
         img = Image.open(cam_info.image_path)
-        img = img.crop((0, 0, orig_w, orig_h))  # crop the image to the minimum size in dataset
+        img = img.crop(
+            (0, 0, orig_w, orig_h)
+        )  # crop the image to the minimum size in dataset
         raw_data = img.tobytes()
-        raw_data_path = os.path.join(decode_dataset_path, 'dataset_raw', (cam_info.image_name.lstrip('/') + '.raw'))
+        raw_data_path = os.path.join(
+            decode_dataset_path,
+            "dataset_raw",
+            (cam_info.image_name.lstrip("/") + ".raw"),
+        )
         os.makedirs(os.path.dirname(raw_data_path), exist_ok=True)
-        with open(raw_data_path, 'wb+') as raw_file:
+        with open(raw_data_path, "wb+") as raw_file:
             raw_file.write(raw_data)
         img.close()
         return True
@@ -247,10 +272,11 @@ def _process_single_image_for_predecode(params):
         print(f"Error processing {cam_info.image_path}: {e}")
         return False
 
+
 def predecode_dataset_to_disk_multiprocess(cam_infos, args, num_workers=None):
     """
     Multiprocessing version of predecode_dataset_to_disk for faster processing.
-    
+
     Args:
         cam_infos: List of camera info objects
         args: Arguments object
@@ -258,26 +284,25 @@ def predecode_dataset_to_disk_multiprocess(cam_infos, args, num_workers=None):
     """
     args = get_args()
     orig_h, orig_w = utils.get_img_size()
-    
+
     # Create tasks for multiprocessing
     tasks = [(c, args.decode_dataset_path, orig_w, orig_h) for c in cam_infos]
-    
+
     # Use multiprocessing with reasonable number of workers
     # Cap at 16 to avoid too many open files and resource contention
     if num_workers is None:
         num_workers = min(multiprocessing.cpu_count(), 16)
-    
+
     print(f"Using {num_workers} worker processes for image predecoding")
-    
+
     with multiprocessing.Pool(processes=num_workers) as pool:
         list(
             tqdm(
                 pool.imap(_process_single_image_for_predecode, tasks),
                 total=len(cam_infos),
-                desc="Predecoding images to disk (multiprocess)"
+                desc="Predecoding images to disk (multiprocess)",
             )
         )
-
 
 
 def predecode_dataset_to_disk(cam_infos, args):
@@ -291,16 +316,22 @@ def predecode_dataset_to_disk(cam_infos, args):
     orig_h, orig_w = utils.get_img_size()
     for id, c in tqdm(enumerate(cam_infos), total=len(cam_infos)):
         img = Image.open(c.image_path)
-        img = img.crop((0, 0, orig_w, orig_h)) # crop the image to the minimum size in dataset
+        img = img.crop(
+            (0, 0, orig_w, orig_h)
+        )  # crop the image to the minimum size in dataset
         raw_data = img.tobytes()
-        raw_data_path = os.path.join(args.decode_dataset_path, 'dataset_raw', (c.image_name.lstrip('/') + '.raw'))
+        raw_data_path = os.path.join(
+            args.decode_dataset_path, "dataset_raw", (c.image_name.lstrip("/") + ".raw")
+        )
         os.makedirs(os.path.dirname(raw_data_path), exist_ok=True)
-        with open(raw_data_path, 'wb+') as raw_file:
+        with open(raw_data_path, "wb+") as raw_file:
             raw_file.write(raw_data)
+
 
 def clean_up_disk(args):
     args = get_args()
-    shutil.rmtree(os.path.join(args.decode_dataset_path, 'dataset_raw'))
+    shutil.rmtree(os.path.join(args.decode_dataset_path, "dataset_raw"))
+
 
 def cameraList_from_camInfos(cam_infos, args):
     args = get_args()
@@ -314,9 +345,7 @@ def cameraList_from_camInfos(cam_infos, args):
         decompressed_images = [None for _ in cam_infos]
 
     camera_list = []
-    for id, c in tqdm(
-        enumerate(cam_infos), total=len(cam_infos)
-    ):
+    for id, c in tqdm(enumerate(cam_infos), total=len(cam_infos)):
         camera_list.append(
             loadCam(
                 args,

@@ -20,16 +20,21 @@ import math
 
 SPACE_SORT_KEY_DIM = -1
 
+
 def set_space_sort_key_dim(dim):
     global SPACE_SORT_KEY_DIM
     # import pdb; pdb.set_trace()
     SPACE_SORT_KEY_DIM = dim
 
+
 def get_space_sort_key_dim():
     global SPACE_SORT_KEY_DIM
     if SPACE_SORT_KEY_DIM == -1:
-        raise ValueError("SPACE_SORT_KEY_DIM is not set. Please set it using set_space_sort_key_dim(dim).")
+        raise ValueError(
+            "SPACE_SORT_KEY_DIM is not set. Please set it using set_space_sort_key_dim(dim)."
+        )
     return SPACE_SORT_KEY_DIM
+
 
 class Camera(nn.Module):
     def __init__(
@@ -80,7 +85,9 @@ class Camera(nn.Module):
         self.scale = scale
 
         self.world_view_transform = (
-            torch.tensor(getWorld2View2(R, T, trans, scale)).transpose(0, 1).to(self.device)
+            torch.tensor(getWorld2View2(R, T, trans, scale))
+            .transpose(0, 1)
+            .to(self.device)
         )
         self.world_view_transform_backup = self.world_view_transform.clone().detach()
         self.projection_matrix = (
@@ -96,10 +103,10 @@ class Camera(nn.Module):
             )
         ).squeeze(0)
         self.camera_center = self.world_view_transform.inverse()[3, :3]
-        self.camera_center_cpu = self.camera_center.cpu().tolist() # [x,y,z]
+        self.camera_center_cpu = self.camera_center.cpu().tolist()  # [x,y,z]
 
         # self.K = self.create_k_on_gpu()
-    
+
     def create_k_on_gpu(self):
         # Set up rasterization configuration
         image_width = int(self.image_width)

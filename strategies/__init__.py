@@ -12,5 +12,4 @@ This package contains different offloading strategies for training 3D Gaussian S
 from . import naive_offload
 from . import clm_offload
 
-__all__ = ['naive_offload', 'clm_offload']
-
+__all__ = ["naive_offload", "clm_offload"]

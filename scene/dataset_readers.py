@@ -260,7 +260,7 @@ def readCamerasFromTransformsCity(
     extension=".png",
     undistorted=False,
     is_debug=False,
-    mode="train"
+    mode="train",
 ):
     args = utils.get_args()
     cam_infos = []
@@ -269,7 +269,9 @@ def readCamerasFromTransformsCity(
         # TODO: Support undistortion here. Please refer to octree-gs implementation.
 
     if args.matrixcity_ocean_mask:
-        transforms_ocean_json_path = os.path.join(path, transformsfile.replace(".json", "_ocean_info.json"))
+        transforms_ocean_json_path = os.path.join(
+            path, transformsfile.replace(".json", "_ocean_info.json")
+        )
 
         print(f"Loading ocean info from {transforms_ocean_json_path}")
         with open(transforms_ocean_json_path, "r") as ocean_json_file:
@@ -278,23 +280,29 @@ def readCamerasFromTransformsCity(
         print(f"Loading original transforms from {os.path.join(path, transformsfile)}")
         with open(os.path.join(path, transformsfile)) as json_file:
             transforms = json.load(json_file)
-        
+
         transforms_frames = transforms["frames"]
         transforms_ocean_frames = transforms_ocean["frames"]
-        assert len(transforms_frames) == len(transforms_ocean_frames), "Ocean info does not match the original frames"
+        assert len(transforms_frames) == len(
+            transforms_ocean_frames
+        ), "Ocean info does not match the original frames"
 
         new_frames = []
         for i in range(len(transforms_frames)):
             # assert transforms_frames[i]["file_path"] suffix is transforms_ocean_frames[i]["file_name"]
-            assert transforms_frames[i]["file_name"][-len(transforms_ocean_frames[i]["file_name"]):] == transforms_ocean_frames[i]["file_name"], f"Ocean info does not match the original frames at index {i}. Filename: {transforms_frames[i]['file_path']} vs {transforms_ocean_frames[i]['file_name']}"
+            assert (
+                transforms_frames[i]["file_name"][
+                    -len(transforms_ocean_frames[i]["file_name"]) :
+                ]
+                == transforms_ocean_frames[i]["file_name"]
+            ), f"Ocean info does not match the original frames at index {i}. Filename: {transforms_frames[i]['file_path']} vs {transforms_ocean_frames[i]['file_name']}"
             if not transforms_ocean_frames[i]["is_ocean"]:
                 new_frames.append(transforms_frames[i])
         transforms["frames"] = new_frames
-    
+
     else:
         with open(os.path.join(path, transformsfile)) as json_file:
             transforms = json.load(json_file)
-
 
     # contents = json.load(json_file)
     try:
@@ -377,7 +385,7 @@ def readCamerasFromTransformsCity(
 
         if is_debug and idx > 50:
             break
-    
+
     return cam_infos
 
 
@@ -508,7 +516,7 @@ def readCityInfo(
         white_background,
         extension,
         undistorted,
-        mode="train"
+        mode="train",
     )
 
     if args.eval:
@@ -519,7 +527,7 @@ def readCityInfo(
             white_background,
             extension,
             undistorted,
-            mode="test"
+            mode="test",
         )
     else:
         test_cam_infos = []

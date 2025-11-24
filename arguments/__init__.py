@@ -72,88 +72,107 @@ class AuxiliaryParams(ParamGroup):
         # ====================================================================
 
         # --- No Offload (GPU Baseline) ---
-        self.no_offload = False          # Enable no offload mode
+        self.no_offload = False  # Enable no offload mode
 
         # --- NAIVE Offload ---
         self.naive_offload = False  # Enable naive offload mode
-        
+
         # --- CLM Offload ---
-        self.clm_offload = False             # Enable final offload mode (required for pipelined_offload)
+        self.clm_offload = (
+            False  # Enable final offload mode (required for pipelined_offload)
+        )
         self.prealloc_capacity = -1  # Pre-allocated capacity for parameters
         # --- CLM Offload Advanced Flags (you might not need to change these) ---
-        self.comm_stream_priority = -1 # by default, use -1 as the priority of the stream
-        self.grid_size_H = 32            # Grid size for height dimension (used in filtering/spatial hashing)
-        self.grid_size_D = 128            # Grid size for depth dimension
-        self.reorder_by_min_sparsity_at_end = True # Reorder Gaussians by minimum sparsity at end of training
+        self.comm_stream_priority = (
+            -1
+        )  # by default, use -1 as the priority of the stream
+        self.grid_size_H = (
+            32  # Grid size for height dimension (used in filtering/spatial hashing)
+        )
+        self.grid_size_D = 128  # Grid size for depth dimension
+        self.reorder_by_min_sparsity_at_end = (
+            True  # Reorder Gaussians by minimum sparsity at end of training
+        )
 
         # --- Shared Offload Optimization Flags (used by both modes) ---
-        self.sparse_adam = False         # Use sparse Adam optimizer (only update visible Gaussians)
-        
+        self.sparse_adam = (
+            False  # Use sparse Adam optimizer (only update visible Gaussians)
+        )
+
         # ====================================================================
         # MEMORY MANAGEMENT
         # ====================================================================
-        
+
         # ====================================================================
         # DATA LOADING & DATASET
         # ====================================================================
-        self.dataset_cache_and_stream_mode = "load_from_disk_on_demand" # or "load_from_cpuram_on_demand"
+        self.dataset_cache_and_stream_mode = (
+            "load_from_disk_on_demand"  # or "load_from_cpuram_on_demand"
+        )
         self.decode_dataset_path = ""  # Path for decoded dataset storage
         self.multiprocesses_decode_dataset_to_disk = True
-        self.num_workers = 0             # Number of worker threads for data loading
-        self.sharing_strategy = "default" # PyTorch multiprocessing sharing strategy: "default" ("file_descriptor"), or "file_system"
-        self.llffhold = 8                # LLFF dataset hold-out value
-        
+        self.num_workers = 0  # Number of worker threads for data loading
+        self.sharing_strategy = "default"  # PyTorch multiprocessing sharing strategy: "default" ("file_descriptor"), or "file_system"
+        self.llffhold = 8  # LLFF dataset hold-out value
+
         self.initial_point_cloud_downsampled_ratio = 1.0
         # ====================================================================
         # MODEL I/O
         # ====================================================================
-        self.load_ply_path = ""          # Path to load pre-trained PLY file
-        self.load_ply_max = 1_000_000    # Maximum number of points to load from PLY
-        self.load_pt_path = ""           # Path to load PyTorch checkpoint
-        self.dense_ply_file = ""         # Path to dense PLY file
-        self.start_checkpoint = ""       # Checkpoint to resume training from
-        self.auto_start_checkpoint = False  # Automatically find and load latest checkpoint
-        
+        self.load_ply_path = ""  # Path to load pre-trained PLY file
+        self.load_ply_max = 1_000_000  # Maximum number of points to load from PLY
+        self.load_pt_path = ""  # Path to load PyTorch checkpoint
+        self.dense_ply_file = ""  # Path to dense PLY file
+        self.start_checkpoint = ""  # Checkpoint to resume training from
+        self.auto_start_checkpoint = (
+            False  # Automatically find and load latest checkpoint
+        )
+
         # ====================================================================
         # LOGGING & MONITORING
         # ====================================================================
         self.log_folder = "/tmp/gaussian_splatting"  # Folder for logging outputs
-        self.log_interval = 250          # Iteration interval for logging
-        self.quiet = False               # Suppress verbose output
-        
+        self.log_interval = 250  # Iteration interval for logging
+        self.quiet = False  # Suppress verbose output
+
         # ====================================================================
         # TRAINING CONTROL & EVALUATION
         # ====================================================================
-        self.test_iterations = [7_000, 30_000]     # Iterations at which to run test evaluation
-        self.save_iterations = []     # Iterations at which to save model
+        self.test_iterations = [
+            7_000,
+            30_000,
+        ]  # Iterations at which to run test evaluation
+        self.save_iterations = []  # Iterations at which to save model
         self.checkpoint_iterations = []  # Iterations at which to save checkpoints
 
         # ====================================================================
         # DEBUGGING & PROFILING
         # ====================================================================
-        self.debug_from = -1             # Start debugging from this iteration
-        self.detect_anomaly = False      # Enable PyTorch anomaly detection
-        
+        self.debug_from = -1  # Start debugging from this iteration
+        self.detect_anomaly = False  # Enable PyTorch anomaly detection
+
         # ====================================================================
         # HARDWARE & DEVICE
         # ====================================================================
-        self.gpu = 0                     # GPU device ID to use
-        
+        self.gpu = 0  # GPU device ID to use
+
         # ====================================================================
         # DATASET-SPECIFIC FLAGS
         # ====================================================================
-        self.matrixcity_ocean_mask = False  # Enable ocean masking for MatrixCity dataset
-        
+        self.matrixcity_ocean_mask = (
+            False  # Enable ocean masking for MatrixCity dataset
+        )
+
         # ====================================================================
         # EXPERIMENTAL / ADVANCED FLAGS
         # ====================================================================
-        self.packed = False              # Use packed representation
+        self.packed = False  # Use packed representation
 
         self.num_save_images_during_eval = 0
-        
+
         super().__init__(parser, "Loading Parameters", sentinel)
 
-    def extract(self, args): 
+    def extract(self, args):
         g = super().extract(args)
         return g
 
@@ -208,16 +227,23 @@ class OptimizationParams(ParamGroup):
 
         # Dataset and Model save
         self.bsz = 1  # batch size.
-        self.multiprocesses_image_loading = False # Disable multiprocess image loading by default to avoid out of shared memory
+        self.multiprocesses_image_loading = False  # Disable multiprocess image loading by default to avoid out of shared memory
         self.num_train_cameras = -1
         self.num_test_cameras = -1
 
         self.exact_filter = True
         self.log_cpu_adam_trailing_overhead = False
-        self.cpu_adam_trailing_overhead = {"step": 1, "from_default_stream": 0.0, "from_comm_stream": 0.0}
+        self.cpu_adam_trailing_overhead = {
+            "step": 1,
+            "from_default_stream": 0.0,
+            "from_comm_stream": 0.0,
+        }
 
-        self.max_num_images_to_evaluate = int(1e9) # maximum number of images to evaluate during testing. 
+        self.max_num_images_to_evaluate = int(
+            1e9
+        )  # maximum number of images to evaluate during testing.
         super().__init__(parser, "Optimization Parameters")
+
 
 class BenchmarkParams(ParamGroup):
     def __init__(self, parser):
@@ -240,12 +266,12 @@ class DebugParams(ParamGroup):
 
         self.nsys_profile = False  # profile with nsys.
         self.nsys_profile_start_iter = 1  # profile with nsys start iteration.
-        self.nsys_profile_end_iter = 1000000 # profile with nsys end iteration.
+        self.nsys_profile_end_iter = 1000000  # profile with nsys end iteration.
         self.drop_initial_3dgs_p = 0.0  # profile with nsys.
         self.drop_duplicate_gaussians_coeff = 1.0
-        self.do_not_save = False # Do not save model
-        self.reset_each_iter = False # Reset max memory for  each iteration
-        self.save_tensors = False # Save model parameters as .pt file
+        self.do_not_save = False  # Do not save model
+        self.reset_each_iter = False  # Reset max memory for  each iteration
+        self.save_tensors = False  # Save model parameters as .pt file
 
         self.reinit_ply = False
 
@@ -306,7 +332,9 @@ def find_latest_checkpoint(log_folder):
 
 def init_args(args):
 
-    assert sum([args.clm_offload, args.naive_offload, args.no_offload]) == 1, "Exactly one of clm_offload, naive_offload, or no_offload must be True"
+    assert (
+        sum([args.clm_offload, args.naive_offload, args.no_offload]) == 1
+    ), "Exactly one of clm_offload, naive_offload, or no_offload must be True"
 
     # Logging are saved with where model is saved.
     args.log_folder = args.model_path

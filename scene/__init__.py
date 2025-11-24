@@ -17,17 +17,30 @@ from torch.utils.data import Dataset
 from utils.system_utils import searchForMaxIteration
 from scene.dataset_readers import sceneLoadTypeCallbacks
 from strategies.base_gaussian_model import BaseGaussianModel
-from utils.camera_utils import cameraList_from_camInfos, camera_to_JSON, loadCam, predecode_dataset_to_disk, clean_up_disk, loadCam_raw_from_disk
+from utils.camera_utils import (
+    cameraList_from_camInfos,
+    camera_to_JSON,
+    loadCam,
+    predecode_dataset_to_disk,
+    clean_up_disk,
+    loadCam_raw_from_disk,
+)
 import utils.general_utils as utils
 import psutil
 from scene.cameras import set_space_sort_key_dim
+
 
 class Scene:
 
     gaussians: BaseGaussianModel
 
     def __init__(
-        self, args, gaussians: BaseGaussianModel, load_iteration=None, shuffle=True, only_for_rendering=False
+        self,
+        args,
+        gaussians: BaseGaussianModel,
+        load_iteration=None,
+        shuffle=True,
+        only_for_rendering=False,
     ):
         """b
         :param path: Path to colmap scene main folder.
@@ -48,7 +61,7 @@ class Scene:
             scene_info = sceneLoadTypeCallbacks["Colmap"](
                 args.source_path, args.images, args.eval, args.llffhold
             )
-        else:  # NOTE: we only support colmap format and matrixcity format dataset for now. 
+        else:  # NOTE: we only support colmap format and matrixcity format dataset for now.
             scene_info = sceneLoadTypeCallbacks["City"](
                 args.source_path,
                 args.random_background,
@@ -60,7 +73,7 @@ class Scene:
             # with open(scene_info.ply_path, "rb") as src_file, open(
             #     os.path.join(self.model_path, "input.ply"), "wb"
             # ) as dest_file:
-                # dest_file.write(src_file.read())
+            # dest_file.write(src_file.read())
             json_cams = []
             camlist = []
             if scene_info.test_cameras:
@@ -83,18 +96,34 @@ class Scene:
         utils.log_cpu_memory_usage("before decoding images")
 
         self.cameras_extent = scene_info.nerf_normalization["radius"]
-        self.scene_info = scene_info # For torch dataloader, save scene_info
+        self.scene_info = scene_info  # For torch dataloader, save scene_info
 
         # Set image size to global varaible. In case not all image sizes are identical, choose the minimum.
         orig_w, orig_h = (
-            min([camera.width for camera in scene_info.train_cameras + scene_info.test_cameras]),
-            min([camera.height for camera in scene_info.train_cameras + scene_info.test_cameras])
+            min(
+                [
+                    camera.width
+                    for camera in scene_info.train_cameras + scene_info.test_cameras
+                ]
+            ),
+            min(
+                [
+                    camera.height
+                    for camera in scene_info.train_cameras + scene_info.test_cameras
+                ]
+            ),
         )
         utils.set_img_size(orig_h, orig_w)
         # Dataset size in GB
-        if (args.num_train_cameras > 0):
-            assert args.num_test_cameras > 0, "Should set both `num_train_cameras` and `num_test_cameras`"
-            assert args.num_train_cameras <= len(scene_info.train_cameras) and args.num_test_cameras <= len(scene_info.test_cameras), "Can not config more cameras than dataset size"
+        if args.num_train_cameras > 0:
+            assert (
+                args.num_test_cameras > 0
+            ), "Should set both `num_train_cameras` and `num_test_cameras`"
+            assert args.num_train_cameras <= len(
+                scene_info.train_cameras
+            ) and args.num_test_cameras <= len(
+                scene_info.test_cameras
+            ), "Can not config more cameras than dataset size"
             dataset_size_in_GB = (
                 1.0
                 * (args.num_train_cameras + args.num_test_cameras)
@@ -113,30 +142,40 @@ class Scene:
                 / 1e9
             )
         log_file.write(f"Dataset size: {dataset_size_in_GB} GB\n")
-        
+
         # Preprocess dataset
         # Train on original resolution, no downsampling in our implementation.
 
         # Predecode dataset as raw files to local disk
         # If decode_dataset_path does not exist, run predecode
         if args.decode_dataset_path == "":
-            args.decode_dataset_path = os.path.join(args.source_path, f"decoded_{args.images}")
+            args.decode_dataset_path = os.path.join(
+                args.source_path, f"decoded_{args.images}"
+            )
             os.makedirs(args.decode_dataset_path, exist_ok=True)
             print("create folder: ", args.decode_dataset_path)
             log_file.write(f"create folder: {args.decode_dataset_path}\n")
 
         self.decode_dataset_path = os.path.join(args.decode_dataset_path, "dataset_raw")
-        
+
         if not os.path.isdir(self.decode_dataset_path):
             os.makedirs(self.decode_dataset_path)
             statvfs = os.statvfs(args.decode_dataset_path)
             available_space_in_GB = 1.0 * statvfs.f_frsize * statvfs.f_bavail / 1e9
-            assert available_space_in_GB >= dataset_size_in_GB, f"Not enough space in disk for decompressed dataset. avail: {available_space_in_GB}. need: {dataset_size_in_GB}"
-            log_file.write(f"[NOTE]: Pre-decoding dataset({dataset_size_in_GB}GB) to disk dir: {self.decode_dataset_path}\n")
+            assert (
+                available_space_in_GB >= dataset_size_in_GB
+            ), f"Not enough space in disk for decompressed dataset. avail: {available_space_in_GB}. need: {dataset_size_in_GB}"
+            log_file.write(
+                f"[NOTE]: Pre-decoding dataset({dataset_size_in_GB}GB) to disk dir: {self.decode_dataset_path}\n"
+            )
             do_decode = True
         else:
-            log_file.write(f"[NOTE]: Reusing decoded dataset({dataset_size_in_GB}GB) in disk dir: {self.decode_dataset_path}\n")
-            utils.print_rank_0(f"Reusing decoded dataset on disk: {self.decode_dataset_path}")
+            log_file.write(
+                f"[NOTE]: Reusing decoded dataset({dataset_size_in_GB}GB) in disk dir: {self.decode_dataset_path}\n"
+            )
+            utils.print_rank_0(
+                f"Reusing decoded dataset on disk: {self.decode_dataset_path}"
+            )
             do_decode = False
 
         self.train_cameras = None
@@ -149,15 +188,10 @@ class Scene:
             utils.print_rank_0("Decoding Training Cameras To Disk")
             predecode_dataset_to_disk(train_cameras, args)
         self.train_cameras_info = train_cameras
-        
+
         if len(train_cameras) > 0:
-            log_file.write(
-                "Train Image size: {}x{}\n".format(
-                    orig_h,
-                    orig_w
-                )
-            )
-        
+            log_file.write("Train Image size: {}x{}\n".format(orig_h, orig_w))
+
         if args.eval:
             if args.num_test_cameras >= 0:
                 test_cameras = scene_info.test_cameras[: args.num_test_cameras]
@@ -167,21 +201,16 @@ class Scene:
                 utils.print_rank_0("Decoding Test Cameras To Disk")
                 predecode_dataset_to_disk(test_cameras, args)
             self.test_cameras_info = test_cameras
-            
+
             if len(test_cameras) > 0:
-                log_file.write(
-                    "Test Image size: {}x{}\n".format(
-                        orig_h,
-                        orig_w
-                    )
-                )
+                log_file.write("Test Image size: {}x{}\n".format(orig_h, orig_w))
 
         utils.check_initial_gpu_memory_usage("after Loading all images")
         utils.log_cpu_memory_usage("after decoding images")
 
-        if args.load_pt_path != '':
+        if args.load_pt_path != "":
             self.gaussians.load_tensors(args.load_pt_path)
-        elif args.load_ply_path != '':
+        elif args.load_ply_path != "":
             self.gaussians.load_ply(args.load_ply_path)
         elif load_iteration:
             if load_iteration == -1:
@@ -198,14 +227,21 @@ class Scene:
             )
         else:
             # Three model types use create_from_pcd
-            self.gaussians.create_from_pcd(scene_info.point_cloud, self.cameras_extent, 
-                subsample_ratio=args.initial_point_cloud_downsampled_ratio)
+            self.gaussians.create_from_pcd(
+                scene_info.point_cloud,
+                self.cameras_extent,
+                subsample_ratio=args.initial_point_cloud_downsampled_ratio,
+            )
 
         utils.check_initial_gpu_memory_usage("after initializing point cloud")
         utils.log_cpu_memory_usage("after loading initial 3dgs points")
 
         # get the longest axis in self.gaussians
-        longest_axis = (self.gaussians._xyz.max(0)[0] - self.gaussians._xyz.min(0)[0]).argmax().item()
+        longest_axis = (
+            (self.gaussians._xyz.max(0)[0] - self.gaussians._xyz.min(0)[0])
+            .argmax()
+            .item()
+        )
         # import pdb; pdb.set_trace()
         set_space_sort_key_dim(longest_axis)
 
@@ -214,7 +250,7 @@ class Scene:
             self.model_path, f"saved_tensors/iteration_{iteration}"
         )
         self.gaussians.save_tensors(parent_path)
-    
+
     def save(self, iteration):
         point_cloud_path = os.path.join(
             self.model_path, "point_cloud/iteration_{}".format(iteration)
@@ -229,10 +265,16 @@ class Scene:
             self.gaussians.save_ply(os.path.join(point_cloud_path, "point_cloud.ply"))
         else:
             # Save in multiple sub files.
-            n_split = int((required_bytes + avail_ram_bytes * 0.8 - 1) // (avail_ram_bytes * 0.8))
+            n_split = int(
+                (required_bytes + avail_ram_bytes * 0.8 - 1) // (avail_ram_bytes * 0.8)
+            )
             split_size = (N + n_split - 1) // n_split
-            utils.print_rank_0(f"Requires {required_bytes / 1024 / 1024 / 1024:.3f} GB RAM for saving. Avail {avail_ram_bytes / 1024 / 1024 / 1024:.3f} GB. Split: {N} -> {n_split} x {split_size}")
-            self.gaussians.save_sub_plys(os.path.join(point_cloud_path, "point_cloud.ply"), n_split, split_size)   
+            utils.print_rank_0(
+                f"Requires {required_bytes / 1024 / 1024 / 1024:.3f} GB RAM for saving. Avail {avail_ram_bytes / 1024 / 1024 / 1024:.3f} GB. Split: {N} -> {n_split} x {split_size}"
+            )
+            self.gaussians.save_sub_plys(
+                os.path.join(point_cloud_path, "point_cloud.ply"), n_split, split_size
+            )
 
     def getTrainCameras(self):
         return self.train_cameras
@@ -242,7 +284,7 @@ class Scene:
 
     def getTestCameras(self):
         return self.test_cameras
-    
+
     def getTestCamerasInfo(self):
         return self.test_cameras_info
 
@@ -263,11 +305,14 @@ class Scene:
         #     clean_up_disk(self.args)
         #     utils.print_rank_0("Cleaned up decoded dataset on disk.")
 
+
 class SceneDataset:
     def __init__(self, cameras, cameras_info=None):
         self.cameras = cameras
         self.cameras_info = cameras_info
-        self.camera_size = len(self.cameras) if self.cameras is not None else len(self.cameras_info)
+        self.camera_size = (
+            len(self.cameras) if self.cameras is not None else len(self.cameras_info)
+        )
 
         self.cur_epoch_cameras = []
         self.cur_iteration = 0
@@ -304,7 +349,9 @@ class SceneDataset:
             while self.cur_epoch_cameras[idx] in batched_cameras_uid:
                 idx += 1
             camera_idx = self.cur_epoch_cameras.pop(idx)
-            viewpoint_cam = loadCam_raw_from_disk(args, camera_idx, self.cameras_info[camera_idx], to_gpu=True)
+            viewpoint_cam = loadCam_raw_from_disk(
+                args, camera_idx, self.cameras_info[camera_idx], to_gpu=True
+            )
         else:
             idx = 0
             while self.cameras[self.cur_epoch_cameras[idx]].uid in batched_cameras_uid:
@@ -356,24 +403,25 @@ class SceneDataset:
                 )
                 self.iteration_loss = []
 
+
 def load_scene_info_for_rendering(args):
     """
     Load scene information (camera poses, intrinsics) WITHOUT decoding images to disk.
     This is a lightweight version for rendering-only workflows (e.g., trajectory rendering).
-    
+
     Args:
         args: Arguments containing source_path, images, eval, llffhold, etc.
-    
+
     Returns:
         tuple: (scene_info, cameras_extent) containing camera metadata and scene radius
     """
     # Load scene metadata based on dataset type
-    if os.path.exists(os.path.join(args.source_path, "sparse")):  
+    if os.path.exists(os.path.join(args.source_path, "sparse")):
         # COLMAP format
         scene_info = sceneLoadTypeCallbacks["Colmap"](
             args.source_path, args.images, args.eval, args.llffhold
         )
-    elif "matrixcity" in args.source_path:  
+    elif "matrixcity" in args.source_path:
         # MatrixCity format
         scene_info = sceneLoadTypeCallbacks["City"](
             args.source_path,
@@ -383,15 +431,16 @@ def load_scene_info_for_rendering(args):
         )
     else:
         raise ValueError("No valid dataset found in the source path")
-    
+
     # Get scene extent (radius for normalization)
     cameras_extent = scene_info.nerf_normalization["radius"]
-    
+
     return scene_info, cameras_extent
 
 
 def custom_collate_fn(batch):
     return batch
+
 
 class OffloadSceneDataset(Dataset):
     def __init__(self, cameras_info):
@@ -410,18 +459,18 @@ class OffloadSceneDataset(Dataset):
         self.last_time_point = None
         self.epoch_time = []
         self.epoch_n_sample = []
-    
+
     def __len__(self):
         return self.camera_size
 
     def __getitem__(self, id):
         return loadCam_raw_from_disk(
-                self.args,
-                id,
-                self.cameras_info[id],
-            )
+            self.args,
+            id,
+            self.cameras_info[id],
+        )
 
-    @property 
+    @property
     def cur_epoch(self):
         return len(self.epoch_loss)
 

@@ -15,13 +15,7 @@ LAMBDA_DSSIM = 0.2  # Loss weight for SSIM
 TILE_SIZE = 16
 
 
-def calculate_filters(
-    batched_cameras,
-    xyz_gpu,
-    opacity_gpu,
-    scaling_gpu,
-    rotation_gpu
-):
+def calculate_filters(batched_cameras, xyz_gpu, opacity_gpu, scaling_gpu, rotation_gpu):
     args = utils.get_args()
     # calculate filters for all cameras
     filters = []
@@ -30,31 +24,31 @@ def calculate_filters(
         viewmats = []
         for i, camera in enumerate(batched_cameras):
             K = camera.create_k_on_gpu()
-            viewmat = camera.world_view_transform.transpose(0, 1)  # why transpose # this is originally on gpu
+            viewmat = camera.world_view_transform.transpose(
+                0, 1
+            )  # why transpose # this is originally on gpu
             Ks.append(K)
             viewmats.append(viewmat)
         batched_Ks = torch.stack(Ks)  # (B, 3, 3)
         batched_viewmats = torch.stack(viewmats)  # (B, 4, 4)
 
         # Project Gaussians to 2D. Directly pass in {quats, scales} is faster than precomputing covars.
-        proj_results = (
-            fully_fused_projection(
-                means=xyz_gpu,
-                covars=None,
-                quats=rotation_gpu,
-                scales=scaling_gpu,
-                viewmats=batched_viewmats,
-                Ks=batched_Ks,
-                radius_clip=args.radius_clip,
-                width=int(utils.get_img_width()),
-                height=int(utils.get_img_height()),
-                packed=True,
-            )# TODO: this function is too heavy to compute the filters. we can have much cheaper calculation. 
-        ) # (B, N), (B, N, 2), (B, N), (B, N, 3), (B, N)
+        proj_results = fully_fused_projection(
+            means=xyz_gpu,
+            covars=None,
+            quats=rotation_gpu,
+            scales=scaling_gpu,
+            viewmats=batched_viewmats,
+            Ks=batched_Ks,
+            radius_clip=args.radius_clip,
+            width=int(utils.get_img_width()),
+            height=int(utils.get_img_height()),
+            packed=True,
+        )  # TODO: this function is too heavy to compute the filters. we can have much cheaper calculation.  # (B, N), (B, N, 2), (B, N), (B, N, 3), (B, N)
 
         (
-            camera_ids, # (nnz,)
-            gaussian_ids, # (nnz,)
+            camera_ids,  # (nnz,)
+            gaussian_ids,  # (nnz,)
             _,
             # radii_packed, # (nnz,)
             _,
@@ -68,24 +62,27 @@ def calculate_filters(
         ) = proj_results
 
         output, counts = torch.unique_consecutive(camera_ids, return_counts=True)
-        assert torch.all(output == torch.arange(len(batched_cameras)).cuda()), "Here we assume every camera sees at least one gaussian. This error can be caused by the fact that some cameras see no gaussians."
+        assert torch.all(
+            output == torch.arange(len(batched_cameras)).cuda()
+        ), "Here we assume every camera sees at least one gaussian. This error can be caused by the fact that some cameras see no gaussians."
         # TODO: here we assume every camera sees at least one gaussian.
         counts_cpu = counts.cpu().numpy().tolist()
-        assert sum(counts_cpu) == gaussian_ids.shape[0], "sum(counts_cpu) is supposed to be equal to gaussian_ids.shape[0]"
+        assert (
+            sum(counts_cpu) == gaussian_ids.shape[0]
+        ), "sum(counts_cpu) is supposed to be equal to gaussian_ids.shape[0]"
         gaussian_ids_per_camera = torch.split(gaussian_ids, counts_cpu)
 
-    filters = gaussian_ids_per_camera # on GPU
+    filters = gaussian_ids_per_camera  # on GPU
     return filters, camera_ids, gaussian_ids
 
 
 @torch.compile
 def loss_combined(image, image_gt, ssim_loss):
-    LAMBDA_DSSIM = 0.2 # TODO: allow this to be set by the user
+    LAMBDA_DSSIM = 0.2  # TODO: allow this to be set by the user
     Ll1 = l1_loss(image, image_gt)
-    loss = (1.0 - LAMBDA_DSSIM) * Ll1 + LAMBDA_DSSIM * (
-                1.0 - ssim_loss
-            )
+    loss = (1.0 - LAMBDA_DSSIM) * Ll1 + LAMBDA_DSSIM * (1.0 - ssim_loss)
     return loss
+
 
 class FusedCompiledLoss(torch.nn.Module):
     def __init__(self):
@@ -96,7 +93,9 @@ class FusedCompiledLoss(torch.nn.Module):
         ssim_loss = fused_ssim(image.unsqueeze(0), image_gt.unsqueeze(0))
         return loss_combined(image, image_gt, ssim_loss)
 
+
 FUSED_COMPILED_LOSS_MODULE = FusedCompiledLoss()
+
 
 def torch_compiled_loss(image, image_gt_original):
     global FUSED_COMPILED_LOSS_MODULE
@@ -117,7 +116,7 @@ def pipeline_forward_one_step(
     pipe_args,
     eval=False,
 ):
-    MICRO_BATCH_SIZE = 1 # NOTE: microbatch here only contains one camera.
+    MICRO_BATCH_SIZE = 1  # NOTE: microbatch here only contains one camera.
     image_width = int(utils.get_img_width())
     image_height = int(utils.get_img_height())
     tanfovx = math.tan(camera.FoVx * 0.5)
@@ -139,7 +138,7 @@ def pipeline_forward_one_step(
 
     batched_radiis, batched_means2D, batched_depths, batched_conics, _ = (
         fully_fused_projection(
-            means=filtered_xyz_gpu, # (N, 3)
+            means=filtered_xyz_gpu,  # (N, 3)
             covars=None,
             quats=filtered_rotation_gpu,
             scales=filtered_scaling_gpu,
@@ -149,10 +148,10 @@ def pipeline_forward_one_step(
             height=image_height,
             packed=False,
         )
-    ) # (1, N), (1, N, 2), (1, N), (1, N, 3), (1, N)
+    )  # (1, N), (1, N, 2), (1, N), (1, N, 3), (1, N)
 
     if not eval:
-        batched_means2D.retain_grad() # this is only for training. 
+        batched_means2D.retain_grad()  # this is only for training.
 
     sh_degree = gaussians.active_sh_degree
     # camtoworlds = torch.inverse(viewmat.unsqueeze(0)) # (4, 4)
@@ -162,10 +161,10 @@ def pipeline_forward_one_step(
     batched_colors = spherical_harmonics(
         degrees_to_use=sh_degree, dirs=dirs, coeffs=filtered_shs
     )
-    batched_colors = torch.clamp_min(batched_colors + 0.5, 0.0) # (1, N, 3)
-    batched_opacities = filtered_opacity_gpu.squeeze(1).unsqueeze(0) # (N, 1) -> (1, N)
+    batched_colors = torch.clamp_min(batched_colors + 0.5, 0.0)  # (1, N, 3)
+    batched_opacities = filtered_opacity_gpu.squeeze(1).unsqueeze(0)  # (N, 1) -> (1, N)
 
-    # NOTE: In the above code, we keep the first batch dimension, even if it is always 1. 
+    # NOTE: In the above code, we keep the first batch dimension, even if it is always 1.
 
     # render
     # Identify intersecting tiles.
@@ -185,7 +184,6 @@ def pipeline_forward_one_step(
     isect_offsets = isect_offset_encode(
         isect_ids, MICRO_BATCH_SIZE, tile_width, tile_height
     )  # (MICRO_BATCH_SIZE, tile_height, tile_width)
-
 
     # Rasterize to pixels. batched_rendered_image: (MICRO_BATCH_SIZE, image_height, image_width, 3)
     backgrounds = (

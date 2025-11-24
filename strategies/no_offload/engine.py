@@ -65,10 +65,7 @@ def baseline_accumGrads_micro_step(
     dirs = means3D[None, :, :] - camtoworld[:, None, :3, 3]
 
     colors = spherical_harmonics(
-        degrees_to_use=sh_degree,
-        dirs=dirs,
-        coeffs=shs.unsqueeze(0),
-        masks=(radiis > 0)
+        degrees_to_use=sh_degree, dirs=dirs, coeffs=shs.unsqueeze(0), masks=(radiis > 0)
     )
     colors = torch.clamp_min(colors + 0.5, 0.0)
 
@@ -103,6 +100,7 @@ def baseline_accumGrads_micro_step(
 
     return rendered_image, means2D, radiis, gaussian_ids
 
+
 def baseline_accumGrads_impl(
     gaussians,
     scene,
@@ -125,20 +123,17 @@ def baseline_accumGrads_impl(
     rotations = rotations_origin.detach().requires_grad_(True)
     shs = shs_origin.detach().requires_grad_(True)
 
-    visibility = torch.zeros((means3D.shape[0],), dtype=torch.bool, device="cuda") if sparse_adam else None
+    visibility = (
+        torch.zeros((means3D.shape[0],), dtype=torch.bool, device="cuda")
+        if sparse_adam
+        else None
+    )
 
     for micro_idx, camera in enumerate(batched_cameras):
         torch.cuda.nvtx.range_push(f"micro idx {micro_idx}")
         torch.cuda.nvtx.range_push("forward")
         rendered_image, means2D, radiis, gaussian_ids = baseline_accumGrads_micro_step(
-            means3D,
-            opacities,
-            scales,
-            rotations,
-            shs,
-            sh_degree,
-            camera,
-            background
+            means3D, opacities, scales, rotations, shs, sh_degree, camera, background
         )
         loss = torch_compiled_loss(rendered_image, camera.original_image)
         torch.cuda.nvtx.range_pop()
@@ -165,9 +160,9 @@ def baseline_accumGrads_impl(
         if sparse_adam:
             torch.cuda.nvtx.range_push("update visibility")
             visibility = visibility | (radiis > 0).squeeze()
-            
+
             torch.cuda.nvtx.range_pop()
-        
+
         del loss, rendered_image, means2D, radiis
 
         torch.cuda.nvtx.range_pop()

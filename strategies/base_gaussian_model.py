@@ -52,7 +52,7 @@ class BaseGaussianModel(ABC):
     def __init__(self, sh_degree: int, only_for_rendering: bool = False):
         args = utils.get_args()
         self.args = args
-        
+
         self.active_sh_degree = 0
         self.max_sh_degree = sh_degree
         self._parameters = torch.empty(0)
@@ -165,8 +165,16 @@ class BaseGaussianModel(ABC):
     def construct_list_of_attributes(self):
         l = ["x", "y", "z", "nx", "ny", "nz"]
         # All channels except the 3 DC
-        features_dc_elems = self._features_dc.shape[1] * self._features_dc.shape[2] if len(self._features_dc.shape) == 3 else self._features_dc.shape[1]
-        features_rest_elems = self._features_rest.shape[1] * self._features_rest.shape[2] if len(self._features_rest.shape) == 3 else self._features_rest.shape[1]
+        features_dc_elems = (
+            self._features_dc.shape[1] * self._features_dc.shape[2]
+            if len(self._features_dc.shape) == 3
+            else self._features_dc.shape[1]
+        )
+        features_rest_elems = (
+            self._features_rest.shape[1] * self._features_rest.shape[2]
+            if len(self._features_rest.shape) == 3
+            else self._features_rest.shape[1]
+        )
         for i in range(features_dc_elems):
             l.append("f_dc_{}".format(i))
         for i in range(features_rest_elems):
@@ -177,13 +185,13 @@ class BaseGaussianModel(ABC):
         for i in range(self._rotation.shape[1]):
             l.append("rot_{}".format(i))
         return l
-    
+
     def save_ply(self, path):
         """Save model to PLY file"""
         args = utils.get_args()
         _xyz = _features_dc = _features_rest = _opacity = _scaling = _rotation = None
         utils.log_cpu_memory_usage("start save_ply")
-        
+
         # Directly use local tensors
         _xyz = self._xyz
         _features_dc = self._features_dc
@@ -381,6 +389,11 @@ class BaseGaussianModel(ABC):
 
     @abstractmethod
     def gsplat_add_densification_stats_exact_filter(
-        self, viewspace_point_tensor_grad, radii, send2gpu_final_filter_indices, width, height
+        self,
+        viewspace_point_tensor_grad,
+        radii,
+        send2gpu_final_filter_indices,
+        width,
+        height,
     ):
         pass

@@ -69,27 +69,28 @@ class GaussianModelNoOffload(BaseGaussianModel):
             self.spatial_lr_scale,
         ) = model_args
         if self._features_rest.dim == 3:
-            self._features_rest = self._features_rest.view(self._features_rest.shape[0], -1)
+            self._features_rest = self._features_rest.view(
+                self._features_rest.shape[0], -1
+            )
         self.training_setup(training_args)
         self.xyz_gradient_accum = xyz_gradient_accum
         self.denom = denom
         if opt_dict is not None:
             self.optimizer.load_state_dict(opt_dict)
 
-    def create_from_pcd(self, pcd: BasicPointCloud, spatial_lr_scale: float, subsample_ratio=1.0):
+    def create_from_pcd(
+        self, pcd: BasicPointCloud, spatial_lr_scale: float, subsample_ratio=1.0
+    ):
         """Initialize from point cloud data (GPU only)"""
         log_file = utils.get_log_file()
         self.spatial_lr_scale = spatial_lr_scale
 
-        fused_point_cloud = (
-            torch.tensor(np.asarray(pcd.points)).float()
-        )
+        fused_point_cloud = torch.tensor(np.asarray(pcd.points)).float()
         fused_point_cloud = fused_point_cloud.contiguous()
         fused_color = RGB2SH(torch.tensor(np.asarray(pcd.colors)).float())
-        features = (
-            torch.zeros((fused_color.shape[0], 3, (self.max_sh_degree + 1) ** 2))
-            .float()
-        )
+        features = torch.zeros(
+            (fused_color.shape[0], 3, (self.max_sh_degree + 1) ** 2)
+        ).float()
         features[:, :3, 0] = fused_color
         features[:, 3:, 1:] = 0.0
 
@@ -124,37 +125,40 @@ class GaussianModelNoOffload(BaseGaussianModel):
         rots[:, 0] = 1
 
         opacities = inverse_sigmoid(
-            0.1
-            * torch.ones(
-                (N, 1), dtype=torch.float, device="cuda"
-            )
+            0.1 * torch.ones((N, 1), dtype=torch.float, device="cuda")
         )
 
         args = utils.get_args()
         log_file.write("Number of initialized points: {}\n".format(N))
 
         if args.drop_initial_3dgs_p > 0.0:
-            drop_mask = (
-                np.random.rand(N) > args.drop_initial_3dgs_p
-            )
+            drop_mask = np.random.rand(N) > args.drop_initial_3dgs_p
             fused_point_cloud = fused_point_cloud[drop_mask]
             features = features[drop_mask]
             scales = scales[drop_mask]
             rots = rots[drop_mask]
             opacities = opacities[drop_mask]
             log_file.write(
-                "Number of initialized points after random drop: {}\n".format(fused_point_cloud.shape[0])
+                "Number of initialized points after random drop: {}\n".format(
+                    fused_point_cloud.shape[0]
+                )
             )
 
         # Init parameters
         self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
-        self._features_dc = nn.Parameter(features[:, :, 0:1].transpose(1, 2).contiguous().requires_grad_(True))
-        self._features_rest = nn.Parameter(features[:, :, 1:].transpose(1, 2).contiguous().requires_grad_(True))
+        self._features_dc = nn.Parameter(
+            features[:, :, 0:1].transpose(1, 2).contiguous().requires_grad_(True)
+        )
+        self._features_rest = nn.Parameter(
+            features[:, :, 1:].transpose(1, 2).contiguous().requires_grad_(True)
+        )
         self._scaling = nn.Parameter(scales.requires_grad_(True))
         self._rotation = nn.Parameter(rots.requires_grad_(True))
         self._opacity = nn.Parameter(opacities.requires_grad_(True))
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
-        self.sum_visible_count_in_one_batch = torch.zeros((self.get_xyz.shape[0]), device="cuda")
+        self.sum_visible_count_in_one_batch = torch.zeros(
+            (self.get_xyz.shape[0]), device="cuda"
+        )
 
     def all_parameters(self):
         """Return list of all parameters"""
@@ -278,11 +282,21 @@ class GaussianModelNoOffload(BaseGaussianModel):
     def load_tensors(self, parent_path):
         """Load tensors for GPU-only model"""
         _xyz = torch.load(os.path.join(parent_path, "xyz.pt"), map_location="cpu")
-        _opacity = torch.load(os.path.join(parent_path, "opacity.pt"), map_location="cpu")
-        _scaling = torch.load(os.path.join(parent_path, "scaling.pt"), map_location="cpu")
-        _rotation = torch.load(os.path.join(parent_path, "rotation.pt"), map_location="cpu")
-        _features_dc = torch.load(os.path.join(parent_path, "features_dc.pt"), map_location="cpu")
-        _features_rest = torch.load(os.path.join(parent_path, "features_rest.pt"), map_location="cpu")
+        _opacity = torch.load(
+            os.path.join(parent_path, "opacity.pt"), map_location="cpu"
+        )
+        _scaling = torch.load(
+            os.path.join(parent_path, "scaling.pt"), map_location="cpu"
+        )
+        _rotation = torch.load(
+            os.path.join(parent_path, "rotation.pt"), map_location="cpu"
+        )
+        _features_dc = torch.load(
+            os.path.join(parent_path, "features_dc.pt"), map_location="cpu"
+        )
+        _features_rest = torch.load(
+            os.path.join(parent_path, "features_rest.pt"), map_location="cpu"
+        )
 
         N = _xyz.shape[0]
         print("Number of points before initialization : ", N)
@@ -292,7 +306,9 @@ class GaussianModelNoOffload(BaseGaussianModel):
         self._scaling = nn.Parameter(_scaling.to("cuda").requires_grad_(True))
         self._rotation = nn.Parameter(_rotation.to("cuda").requires_grad_(True))
         self._features_dc = nn.Parameter(_features_dc.to("cuda").requires_grad_(True))
-        self._features_rest = nn.Parameter(_features_rest.to("cuda").requires_grad_(True))
+        self._features_rest = nn.Parameter(
+            _features_rest.to("cuda").requires_grad_(True)
+        )
 
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
         self.active_sh_degree = self.max_sh_degree
@@ -310,14 +326,7 @@ class GaussianModelNoOffload(BaseGaussianModel):
 
         for i in range(n_split):
             assert path.endswith(".ply")
-            this_path = (
-                path[:-4]
-                + "_rk"
-                + str(i)
-                + "_ws"
-                + str(n_split)
-                + ".ply"
-            )
+            this_path = path[:-4] + "_rk" + str(i) + "_ws" + str(n_split) + ".ply"
             mkdir_p(os.path.dirname(this_path))
 
             start = i * split_size
@@ -349,7 +358,9 @@ class GaussianModelNoOffload(BaseGaussianModel):
             scale = _scaling.detach()[start:end].cpu().numpy()
             rotation = _rotation.detach()[start:end].cpu().numpy()
 
-            utils.log_cpu_memory_usage(f"[{i/n_split}] after change gpu tensor to cpu numpy")
+            utils.log_cpu_memory_usage(
+                f"[{i/n_split}] after change gpu tensor to cpu numpy"
+            )
 
             dtype_full = [
                 (attribute, "f4") for attribute in self.construct_list_of_attributes()
@@ -367,7 +378,7 @@ class GaussianModelNoOffload(BaseGaussianModel):
                 f"[{i/n_split}] after change numpy to plyelement before writing ply file"
             )
             PlyData([el]).write(this_path)
-               
+
         utils.log_cpu_memory_usage("finish write ply file")
         # remark: max_radii2D, xyz_gradient_accum and denom are not saved here; they are save elsewhere.
 
@@ -378,7 +389,7 @@ class GaussianModelNoOffload(BaseGaussianModel):
         # Single GPU mode - no distribution logic needed
         _xyz = _features_dc = _features_rest = _opacity = _scaling = _rotation = None
         utils.log_cpu_memory_usage("start save_ply")
-        
+
         # Directly use local tensors
         _xyz = self._xyz
         _features_dc = self._features_dc
@@ -512,7 +523,9 @@ class GaussianModelNoOffload(BaseGaussianModel):
     def one_file_load_ply(self, folder):
         """Load from single PLY file"""
         path = os.path.join(folder, "point_cloud.ply")
-        xyz, features_dc, features_extra, opacities, scales, rots = self.load_raw_ply(path)
+        xyz, features_dc, features_extra, opacities, scales, rots = self.load_raw_ply(
+            path
+        )
         N = xyz.shape[0]
 
         _xyz = torch.from_numpy(xyz)
@@ -526,13 +539,15 @@ class GaussianModelNoOffload(BaseGaussianModel):
             _xyz.to(torch.float).to(self.device).requires_grad_(True)
         )
         self._features_dc = nn.Parameter(
-            _features_dc.to(torch.float).to(self.device)
+            _features_dc.to(torch.float)
+            .to(self.device)
             .transpose(1, 2)
             .contiguous()
             .requires_grad_(True)
         )
         self._features_rest = nn.Parameter(
-            _features_rest.to(torch.float).to(self.device)
+            _features_rest.to(torch.float)
+            .to(self.device)
             .transpose(1, 2)
             .contiguous()
             .requires_grad_(True)
@@ -562,10 +577,9 @@ class GaussianModelNoOffload(BaseGaussianModel):
                     else:
                         stored_state["exp_avg"][:, 3:4].zero_()
                         stored_state["exp_avg_sq"][:, 3:4].zero_()
-                    
+
                     self.optimizer.state[group["params"][0]] = stored_state
-                    
-    
+
     def replace_tensor_to_optimizer(self, tensor, name):
         """Replace tensor in optimizer"""
         optimizable_tensors = {}
@@ -596,7 +610,9 @@ class GaussianModelNoOffload(BaseGaussianModel):
             stored_state = self.optimizer.state.get(group["params"][0], None)
             if stored_state is not None:
                 if "exp_avg" not in stored_state:
-                    stored_state["momentum_buffer"] = stored_state["momentum_buffer"][mask]
+                    stored_state["momentum_buffer"] = stored_state["momentum_buffer"][
+                        mask
+                    ]
                 else:
                     stored_state["exp_avg"] = stored_state["exp_avg"][mask]
                     stored_state["exp_avg_sq"] = stored_state["exp_avg_sq"][mask]
@@ -805,9 +821,7 @@ class GaussianModelNoOffload(BaseGaussianModel):
             new_rotation,
         )
 
-    def add_densification_stats(
-        self, viewspace_point_tensor, update_filter
-    ):
+    def add_densification_stats(self, viewspace_point_tensor, update_filter):
         """Add densification statistics"""
         self.xyz_gradient_accum[update_filter] += torch.norm(
             viewspace_point_tensor.grad[update_filter, :2], dim=-1, keepdim=True
@@ -815,7 +829,12 @@ class GaussianModelNoOffload(BaseGaussianModel):
         self.denom[update_filter] += 1
 
     def gsplat_add_densification_stats(
-        self, viewspace_point_tensor_grad, send2gpu_visibility_filter, update_filter, width, height
+        self,
+        viewspace_point_tensor_grad,
+        send2gpu_visibility_filter,
+        update_filter,
+        width,
+        height,
     ):
         """Add densification statistics for gsplat"""
         grad = viewspace_point_tensor_grad  # (B, N, 2)
@@ -840,7 +859,12 @@ class GaussianModelNoOffload(BaseGaussianModel):
         self.denom[visibility] += 1
 
     def gsplat_add_densification_stats_exact_filter(
-        self, viewspace_point_tensor_grad, radii, send2gpu_final_filter_indices, width, height
+        self,
+        viewspace_point_tensor_grad,
+        radii,
+        send2gpu_final_filter_indices,
+        width,
+        height,
     ):
         """Add densification statistics with exact filter"""
         grad = viewspace_point_tensor_grad  # (N, 2)

@@ -142,8 +142,6 @@ def check_update_at_this_iter(iteration, bsz, update_interval, update_residual):
     return False
 
 
-
-
 def inverse_sigmoid(x):
     return torch.log(x / (1 - x))
 
@@ -174,15 +172,13 @@ def gaussian_report(gaussians):
     iteration = get_cur_iter()
     args = get_args()
     log_file = get_log_file()
-    
+
     if (iteration % args.log_interval) == 1:
         log_file.write(
             "### Iteration {}, num of gaussians = {} ###\n".format(
-                iteration,
-                gaussians.get_xyz.shape[0]
+                iteration, gaussians.get_xyz.shape[0]
             )
         )
-    
 
 
 def memory_report(prefix):
@@ -190,7 +186,7 @@ def memory_report(prefix):
     args = get_args()
     log_file = get_log_file()
     p = psutil.Process()
-    
+
     if (iteration % args.log_interval) == 1:
         log_file.write(
             "[Memory Report] {}\n".format(prefix)
@@ -214,8 +210,8 @@ def memory_report(prefix):
                 torch.cuda.memory_reserved() / 1024 / 1024 / 1024,
                 torch.cuda.max_memory_reserved() / 1024 / 1024 / 1024,
             )
-        )  
-        
+        )
+
 
 def check_memory_usage(log_file, args, iteration, gaussians, before_densification_stop):
     p = psutil.Process()
@@ -395,7 +391,7 @@ def prepare_output_and_logger(args):
 def log_cpu_memory_usage(position_str):
     args = get_args()
     p = psutil.Process()
-    
+
     if not args.check_cpu_memory:
         return
     LOG_FILE.write(
@@ -416,8 +412,6 @@ def log_cpu_memory_usage(position_str):
             p.memory_info().dirty / 1024 / 1024 / 1024,
         )
     )
-
-
 
 
 def drop_duplicate_gaussians(model_params, drop_duplicate_gaussians_coeff):
@@ -462,16 +456,17 @@ def load_checkpoint(args):
     # Single GPU mode - load checkpoint from single file
     if args.start_checkpoint[-1] != "/":
         args.start_checkpoint += "/"
-    
+
     # Find the checkpoint file in the directory
-    checkpoint_files = [f for f in os.listdir(args.start_checkpoint) if f.endswith('.pth')]
+    checkpoint_files = [
+        f for f in os.listdir(args.start_checkpoint) if f.endswith(".pth")
+    ]
     assert len(checkpoint_files) > 0, "No checkpoint files found in the directory"
-    
+
     # Use the first checkpoint file (assuming single GPU checkpoint)
     file_name = args.start_checkpoint + checkpoint_files[0]
     (model_params, start_from_this_iteration) = torch.load(
-        file_name, 
-        map_location=torch.device('cpu')
+        file_name, map_location=torch.device("cpu")
     )
 
     if args.drop_duplicate_gaussians_coeff != 1.0:

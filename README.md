@@ -305,7 +305,7 @@ Please use [Black](https://github.com/psf/black) with default settings to format
 
 ```shell
 # Install
-conda install black==24.4.2
+pip install black
 # Format all files
 black .  
 ```
