@@ -242,7 +242,7 @@ Learning rate and momentum are scaled according to Grendel-GS rules when increas
 
 ---
 
-## Complete Tutorials of training three example datasets. 
+## Example Training Tutorials
 
 This section demonstrates CLM-GS on three different scales of scenes, from small benchmarks to extreme-scale reconstructions. Each example includes detailed reproduction instructions and usage pipelines. 
 In all examples, we set `export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` to reduce memory fragmentation in PyTorch's CUDA memory allocator. 
@@ -277,9 +277,32 @@ The MatrixCity BigCity dataset represents the extreme upper bound of scene recon
 
 ---
 
-# Understand CLM implementation and incorporate our ideas into your codebase?
+# Understand CLM implementation and incorporate into your codebase
 
-TODO
+This section explains how the three strategies (`--no_offload`, `--naive_offload`, and `--clm_offload`) are implemented and how you can incorporate them into your own codebase. We first explain the common setup shared across all strategies, then detail each strategy's unique implementation.
+
+## Common Setup
+
+All three strategies share the following optimizations:
+
+1. **Memory fragmentation reduction**: We set `export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` for all training to reduce memory fragmentation in PyTorch's CUDA memory allocator. We observe severe fragmentation in 3DGS training where `torch.cuda.max_memory_reserved()` can be 2× larger than `torch.cuda.max_memory_allocated()`. This occurs because rendering workloads vary significantly between training steps—--rendering one image may require 3× more Gaussians than another. Consequently, fragmentation in 3DGS is more severe than in typical neural network training.
+
+2. **Microbatch pipelining**: We use microbatch pipelining with gradient accumulation instead of rendering a batch of images simultaneously. For each microbatch, we render one image and perform one backpropagation, one by one. The `--bsz` flag controls how many images to process before each optimizer step. This design choice is critical: without microbatch pipelining, activation memory would grow linearly with batch size. With pipelining, activation memory remains constant at the level needed for rendering a single image.
+
+3. **On-demand image loading**: We save the dataset on disk and load it on-demand during training to conserve CPU RAM. For extremely large datasets, it may not be possible to decode the entire dataset into CPU RAM, let alone GPU memory. Note that streaming from disk to GPU is slower than streaming from CPU RAM to GPU.
+
+## Specifics for Each of the 3 Modes
+
+The `strategies/` folder contains the core implementations. We implement a base Gaussian model in `strategies/base_gaussian_model.py` and common rendering functions in `strategies/base_engine.py`. The three strategy folders (`strategies/no_offload/`, `strategies/naive_offload/`, and `strategies/clm_offload/`) inherit these base files and incorporate their respective design details.
+
+Each strategy is explained in detail:
+
+📖 **[Explain `--no_offload`](strategies/no_offload/README.md)**
+
+📖 **[Explain `--naive_offload`](strategies/naive_offload/README.md)**
+
+📖 **[Explain `--clm_offload`](strategies/clm_offload/README.md)**
+
 
 <!-- # Implementation Details
 
