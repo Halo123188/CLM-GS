@@ -46,15 +46,17 @@ This codebase provides three modes of memory-efficient training strategies for y
 **Table of contents**
 -----
 - [Why use CLM-GS?](#why-use-clm-gs)
-- [How to use CLM?](#how-to-use-clm-gs)
+- [How to run CLM?](#how-to-run-clm-gs)
     - [Setup](#setup)
-    - [Training](#training)
-    - [Consideration about the flags](#considerations-about-the-flags)
-- [Example Usages](#example-usages)
+    - [Dataset Preparation](#dataset-preparation)
+    - [Basic Training Commands](#basic-training-commands)
+    - [Example Training Tutorials](#example-training-tutorials)
+- [Understand CLM implementation and incorporate into your codebase](#understand-clm-implementation-and-incorporate-into-your-codebase)
 - [Paper](#paper-and-citation)
 - [License](#license)
 - [Reference](#reference)
 ------
+<!-- - [Consideration about the flags](#considerations-about-the-flags) -->
 <!-- - [Implementation Details](#implementation-details) -->
 
 # Why use CLM-GS
@@ -72,7 +74,7 @@ CLM-GS addresses these memory constraints effectively. The table below compares 
 | `clm_offload`   | 3.01 GB / 1348 s          | 7.05 GB / 12381 s      | 13.0 GB / 24757 s      | 20.79 GB / 11783 s     |
 
 
-# How to use CLM-GS
+# How to run CLM-GS
 
 ## Setup
 
@@ -114,9 +116,7 @@ pip install --no-build-isolation submodules/gsplat
 pip install --no-build-isolation submodules/simple-knn
 ```
 
-## Training
-
-### Dataset Preparation
+## Dataset Preparation
 
 This repository trains a 3D Gaussian Splatting model using COLMAP-formatted input datasets. A COLMAP-formatted dataset contains a list of images with their corresponding camera poses, as well as an initial sparse point cloud that roughly represents the scene structure. This repository can reconstruct a detailed 3DGS model that captures intricate details from these images within the colmap-formatted dataset.
 
@@ -127,7 +127,7 @@ The following two COLMAP-formatted example datasets are available for use in the
 <!-- 
 See [Tutorial 1](release_scripts/mip360_README.md) and [Tutorial 2](release_scripts/rubble4k_README.md) for detailed instructions on training with these datasets to achieve optimal performance.  -->
 
-### Basic Training with Different Strategies
+## Basic Training Commands
 
 **No Offload (GPU-Only, for small scenes)**:
 ```shell
@@ -147,7 +147,8 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 python train.py -s <path to COLMAP dataset> --clm_offload --bsz 4
 ```
 
-## Considerations about the flags
+<details>
+<summary>Considerations about the flags for training your own dataset</summary>
 
 ### **Three offloading strategies**
 
@@ -205,7 +206,7 @@ Where:
 
 **Note**: `--prealloc_capacity` is only effective when `--clm_offload` is enabled.
 
-#### **Microbatch Pipelining**
+### **Microbatch Pipelining**
 
 This codebase uses microbatch pipelining with gradient accumulation. For each microbatch, we render one image and perform one backpropagation. The `--bsz` flag controls how many images to process before each optimizer step.
 
@@ -235,22 +236,24 @@ Learning rate and momentum are scaled according to Grendel-GS rules when increas
   Please follow Gaussian Splatting's original codebase. 
 
 </details>
+
+</details>
 <br>
 
 ---
 
-# Example Usages
+## Complete Tutorials of training three example datasets. 
 
 This section demonstrates CLM-GS on three different scales of scenes, from small benchmarks to extreme-scale reconstructions. Each example includes detailed reproduction instructions and usage pipelines. 
 In all examples, we set `export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` to reduce memory fragmentation in PyTorch's CUDA memory allocator. 
 
-## Our Testbed
+### Our Testbed
 
 All experiments were conducted on:
 - **Hardware**: AMD Ryzen Threadripper PRO 5955WX (16-core), 128GB RAM, NVIDIA RTX 4090 24GB
 - **Interconnect**: PCIe 4.0 x16 (CPU-GPU)
 
-## Example 1: Mip-NeRF 360 Dataset (Small-Scale Benchmark)
+### Example 1: Mip-NeRF 360 Dataset (Small-Scale Benchmark)
 
 The Mip-NeRF 360 dataset provides standard benchmark scenes for evaluating quality and performance. While these scenes are small enough to fit in GPU memory, they serve as a baseline to verify that CLM offloading maintains quality while reducing memory usage.
 
@@ -258,7 +261,7 @@ The Mip-NeRF 360 dataset provides standard benchmark scenes for evaluating quali
 
 ---
 
-## Example 2: Rubble 4K Dataset (Large-Scale Reconstruction)
+### Example 2: Rubble 4K Dataset (Large-Scale Reconstruction)
 
 The MegaNeRF Rubble scene at 4K resolution represents a real-world large-scale outdoor scene that exceeds standard GPU memory capacity. This example demonstrates CLM's ability to train a real-world large-scale scene from scratch. 
 
@@ -266,13 +269,17 @@ The MegaNeRF Rubble scene at 4K resolution represents a real-world large-scale o
 
 ---
 
-## Example 3: MatrixCity BigCity Dataset (Extreme-Scale Reconstruction)
+### Example 3: MatrixCity BigCity Dataset (Extreme-Scale Reconstruction)
 
 The MatrixCity BigCity dataset represents the extreme upper bound of scene reconstruction with synthetic city-scale environments. This demonstrates CLM's capability to handle 100 million Gaussians. This serves as a stress test, requiring 128GB RAM and 24GB GPU memory to successfully train with 100 million Gaussians. 
 
 📖 **[Complete BigCity Tutorial](release_scripts/bigcity_README.md)**
 
 ---
+
+# Understand CLM implementation and incorporate our ideas into your codebase?
+
+TODO
 
 <!-- # Implementation Details
 
