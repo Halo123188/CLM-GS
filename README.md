@@ -353,7 +353,9 @@ black .
 
 # License
 
-This software is distributed under the Gaussian-Splatting License owned by **Inria** and **the Max Planck Institut for Informatik (MPII)**. The license grants non-exclusive rights to use the software for research purposes to research users (both academic and industrial), free of charge, for non-commercial use only.
+This codebase is distributed under the Gaussian-Splatting License owned by **Inria** and **the Max Planck Institut for Informatik (MPII)**. 
+
+This codebase is built upon the original 3D Gaussian Splatting codebase and contains portions of code from the original implementation. As a derivative work, it inherits and complies with the terms of the Gaussian-Splatting License, which grants non-exclusive rights to use the codebase for research purposes to research users (both academic and industrial), free of charge, for non-commercial use only.
 
 See `LICENSE.txt` for the complete license terms and conditions.
 
