@@ -146,7 +146,7 @@ python train.py -s <path to COLMAP dataset> --clm_offload --bsz 4
 ```
 
 <details>
-<summary>Considerations about the flags for training your own dataset</summary>
+<summary>⚙️ <b>(Click to expand) Please considering these flags for training your own dataset</b></summary>
 
 ### **Three offloading strategies**
 
@@ -174,9 +174,9 @@ This mode decodes JPG/PNG images into raw byte data when you first train on a da
 
 If the decoded images path is corrupted or missing, simply remove the folder and rerun the decoding process.
 
-**Mode 2: "decode_images_on_demand"**
+<!-- **Mode 2: "decode_images_on_demand"**
 
-This mode avoids pre-decoding images, saving disk storage space. However, decoding images on the CPU before each rendering pass is slower and consumes additional CPU computation.
+This mode avoids pre-decoding images, saving disk storage space. However, decoding images on the CPU before each rendering pass is slower and consumes additional CPU computation. -->
 
 ### **Pre-allocate buffers for Gaussians on CPU RAM**
 
