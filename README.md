@@ -23,7 +23,8 @@ _<h4>✨ Accepted to appear in ASPLOS 2026 ✨</h4>_
 <div align="left">
 
 <div align="center">
-    <img src="https://cdn.jsdelivr.net/gh/nyu-systems/CLM-GS@main/assets/teaser_11210004_2x.gif" width="1000">
+    <!-- <img src="https://cdn.jsdelivr.net/gh/nyu-systems/CLM-GS@main/assets/teaser_11210004_2x.gif" width="1000"> -->
+    <img src="assets/teaser_11210004_2x.gif" width="1000">
 </div>
 
 # Overview
