@@ -146,7 +146,7 @@ python train.py -s <path to COLMAP dataset> --clm_offload --bsz 4
 ```
 
 <details>
-<summary>⚙️ <b>(Click to expand) Please considering these flags for training your own dataset</b></summary>
+<summary>⚙️ <b>Please considering these flags for training your own dataset (Click to expand)</b></summary>
 
 ### **Three offloading strategies**
 
