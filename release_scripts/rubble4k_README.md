@@ -88,7 +88,7 @@ For `clm_offload`, the script pre-allocates 32M capacity in CPU pinned memory. I
 
 ### Dataset Decoding
 
-Training begins by decoding all JPEG images to raw format and saving them locally to disk. This step significantly improves data loading speed during training. Because the Rubble 4k dataset is very large (the decoded images use about 80GB of disk space), ensure you have sufficient disk space before starting. Decoding is required only once, and future training runs will reuse already-decoded images if they exist. For optimal performance, use a fast local drive (avoid network storage such as NFS), and please refer to the **Dataset Caching and Streaming** section in `README.md` for further information. 
+Training starts by decoding all JPEG images to raw format and saving them locally to disk. During training, the data loader streams images from disk to GPU. This significantly improves data loading speed during training. Because the BigCity dataset is very large (decoded images use about 80GB of disk space), make sure you have enough disk space before starting. Decoding only needs to be done once, and subsequent training runs will reuse the already-decoded images if they exist. For optimal performance, use a fast local drive (avoid network storage such as NFS). By default, decoded images are saved to `args.source_path/decode_{args.images}`. If `args.source_path` is on NFS, specify `args.decode_dataset_path` to point to a local disk location. But you need to ensure the local disk has enough space available. 
 
 ### Checkpoints Saving
 
