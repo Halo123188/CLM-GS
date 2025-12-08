@@ -51,7 +51,8 @@ CUDA_VISIBLE_DEVICES=0 bash release_scripts/rubble4k.sh /path/to/rubble-colmap n
 
 **Note:** The `clm_offload` strategy is recommended for memory efficiency, especially for the 28M scale.
 
-Training results will be saved to `output/rubble/<timestamp>_rubble4k_<scale>_<strategy>/`.
+Training results will be saved to `output/rubble/<timestamp>_rubble4k_<scale>_<strategy>/`. 
+NOTE: Each run requires significant disk space (15GB for rubble 28M) for saving models and rendered images. Ensure you have enough disk space. 
 
 ### Analyzing Results
 

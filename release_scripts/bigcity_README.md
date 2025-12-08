@@ -74,7 +74,8 @@ CUDA_VISIBLE_DEVICES=0 bash release_scripts/bigcity.sh /path/to/matrixcity/big_c
 
 **Note:** `no_offload` and `naive_offload` strategies typically result in out-of-memory (OOM) errors for 100M scale. Only `clm_offload` can successfully handle extreme scales.
 
-Training results will be saved to `output/bigcity/<timestamp>_bigcity_<scale>_<strategy>/`.
+Training results will be saved to `output/bigcity/<timestamp>_bigcity_<scale>_<strategy>/`. 
+NOTE: Each run requires significant disk space (46GB for bigcity 102M) for saving models and rendered images. Ensure you have enough disk space. 
 
 ### Analyzing Results
 
