@@ -307,13 +307,26 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
         timers.stop("send cam matrices to gpu")
 
         # ------------------------------------------------------------------------
-        # 2.4: Load ground-truth images to GPU
+        # 2.4: Load ground-truth images and masks to GPU
         # ------------------------------------------------------------------------
         with torch.no_grad():
             timers.start("load_cameras")
+            masks_in_batch = 0
             for camera in batched_cameras:
                 camera.original_image = camera.original_image_backup.cuda()
+                # Load mask to GPU if available
+                if camera.original_mask_backup is not None:
+                    camera.original_mask = camera.original_mask_backup.cuda()
+                    masks_in_batch += 1
+                else:
+                    camera.original_mask = None
             timers.stop("load_cameras")
+            # Log mask usage on first iteration only
+            if iteration == start_from_this_iteration:
+                if masks_in_batch > 0:
+                    utils.print_rank_0(f"[MASK] Training with masks enabled: {masks_in_batch}/{len(batched_cameras)} cameras in batch have masks")
+                else:
+                    utils.print_rank_0("[MASK] Training without masks (no masks found for cameras)")
         # ------------------------------------------------------------------------
         # 2.5: Forward/Backward Pass - Choose offloading strategy
         # ------------------------------------------------------------------------
@@ -592,9 +605,10 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
         # ------------------------------------------------------------------------
         torch.cuda.synchronize()  # Ensure all GPU operations are complete
 
-        # Release camera image memory
+        # Release camera image and mask memory
         for viewpoint_cam in batched_cameras:
             viewpoint_cam.original_image = None
+            viewpoint_cam.original_mask = None
 
         # End profiling range if active
         if args.nsys_profile:
@@ -684,16 +698,17 @@ def training_report(
         testing_iterations.pop(0)
         utils.print_rank_0("\n[ITER {}] Start Testing".format(iteration))
 
+        # Handle case where test cameras may be None (when not using --eval)
+        test_cams = scene.getTestCameras()
+        test_cams_info = scene.getTestCamerasInfo()
+        test_num_cameras = len(test_cams) if test_cams is not None else (len(test_cams_info) if test_cams_info is not None else 0)
+
         validation_configs = (
             {
                 "name": "test",
-                "cameras": scene.getTestCameras(),
-                "cameras_info": scene.getTestCamerasInfo(),
-                "num_cameras": len(
-                    scene.getTestCameras()
-                    if scene.getTestCameras() is not None
-                    else scene.getTestCamerasInfo()
-                ),
+                "cameras": test_cams,
+                "cameras_info": test_cams_info,
+                "num_cameras": test_num_cameras,
             },
             {
                 "name": "train",
@@ -713,6 +728,10 @@ def training_report(
 
         # init workload division strategy
         for config in validation_configs:
+            # Skip if no cameras available (e.g., test set when not using --eval)
+            if config["num_cameras"] == 0 or config["cameras_info"] is None:
+                continue
+
             # Dataset is offloaded to disk
             l1_test = torch.scalar_tensor(0.0, device="cuda")
             psnr_test = torch.scalar_tensor(0.0, device="cuda")
@@ -742,9 +761,14 @@ def training_report(
                 # batched_cameras = eval_dataset.get_batched_cameras(
                 #     num_camera_to_load
                 # )
-                # Load ground-truth images to GPU
+                # Load ground-truth images and masks to GPU
                 for camera in batched_cameras:
                     camera.original_image = camera.original_image_backup.cuda()
+                    # Load mask to GPU if available
+                    if camera.original_mask_backup is not None:
+                        camera.original_mask = camera.original_mask_backup.cuda()
+                    else:
+                        camera.original_mask = None
 
                 batched_image = []
                 for cam_id, camera in enumerate(batched_cameras):
@@ -833,6 +857,7 @@ def training_report(
                         )
 
                     gt_camera.original_image = None
+                    gt_camera.original_mask = None
 
             psnr_test /= num_cameras
             l1_test /= num_cameras

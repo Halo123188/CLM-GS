@@ -84,6 +84,30 @@ def loss_combined(image, image_gt, ssim_loss):
     return loss
 
 
+@torch.compile
+def loss_combined_masked(image, image_gt, ssim_loss, mask):
+    """Compute masked loss where only pixels with mask=1 contribute to loss.
+
+    Args:
+        image: Rendered image (3, H, W)
+        image_gt: Ground truth image (3, H, W)
+        ssim_loss: SSIM loss value (scalar) - computed on pre-masked images
+        mask: Binary mask (H, W) where 1=valid, 0=masked
+    """
+    LAMBDA_DSSIM = 0.2
+    # Compute masked L1 loss: only count pixels where mask is 1
+    # mask shape: (H, W) -> (1, H, W) for broadcasting with (3, H, W)
+    mask_expanded = mask.unsqueeze(0)  # (1, H, W)
+
+    # Compute pixelwise L1 and apply mask
+    l1_pixelwise = torch.abs(image - image_gt)  # (3, H, W)
+    l1_masked = (l1_pixelwise * mask_expanded).sum() / (mask_expanded.sum() * 3 + 1e-8)
+
+    # SSIM loss is precomputed on masked images (zeroed out in masked regions)
+    loss = (1.0 - LAMBDA_DSSIM) * l1_masked + LAMBDA_DSSIM * (1.0 - ssim_loss)
+    return loss
+
+
 class FusedCompiledLoss(torch.nn.Module):
     def __init__(self):
         super().__init__()
@@ -94,13 +118,61 @@ class FusedCompiledLoss(torch.nn.Module):
         return loss_combined(image, image_gt, ssim_loss)
 
 
+class FusedCompiledLossMasked(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, image, image_gt_original, mask):
+        """Compute loss with mask applied.
+
+        Following simple_trainer.py approach: zero out masked regions in both
+        rendered and GT images before computing SSIM. This ensures SSIM doesn't
+        penalize differences in masked regions.
+
+        Args:
+            image: Rendered image (3, H, W)
+            image_gt_original: Ground truth image in uint8 (3, H, W)
+            mask: Binary mask (H, W) where 1=valid pixels, 0=masked pixels
+        """
+        image_gt = torch.clamp(image_gt_original / 255.0, 0.0, 1.0)
+
+        # Zero out masked regions in both images for SSIM computation
+        # mask shape: (H, W) -> (1, H, W) for broadcasting with (3, H, W)
+        mask_expanded = mask.unsqueeze(0)  # (1, H, W)
+
+        # Clone images and zero out masked regions
+        image_for_ssim = image * mask_expanded
+        image_gt_for_ssim = image_gt * mask_expanded
+
+        # Compute SSIM on masked images
+        ssim_loss = fused_ssim(image_for_ssim.unsqueeze(0), image_gt_for_ssim.unsqueeze(0))
+
+        return loss_combined_masked(image, image_gt, ssim_loss, mask)
+
+
 FUSED_COMPILED_LOSS_MODULE = FusedCompiledLoss()
+FUSED_COMPILED_LOSS_MASKED_MODULE = FusedCompiledLossMasked()
 
 
 def torch_compiled_loss(image, image_gt_original):
     global FUSED_COMPILED_LOSS_MODULE
     loss = FUSED_COMPILED_LOSS_MODULE(image, image_gt_original)
     return loss
+
+
+def torch_compiled_loss_masked(image, image_gt_original, mask):
+    """Compute loss with optional mask.
+
+    Args:
+        image: Rendered image (3, H, W)
+        image_gt_original: Ground truth image in uint8 (3, H, W)
+        mask: Binary mask (H, W) where 1=valid pixels, 0=masked pixels.
+              If None, uses unmasked loss.
+    """
+    global FUSED_COMPILED_LOSS_MASKED_MODULE, FUSED_COMPILED_LOSS_MODULE
+    if mask is None:
+        return FUSED_COMPILED_LOSS_MODULE(image, image_gt_original)
+    return FUSED_COMPILED_LOSS_MASKED_MODULE(image, image_gt_original, mask)
 
 
 def pipeline_forward_one_step(

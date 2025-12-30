@@ -9,7 +9,7 @@ from gsplat import (
     rasterize_to_pixels,
 )
 from densification import update_densification_stats_baseline_accum_grads
-from strategies.base_engine import torch_compiled_loss
+from strategies.base_engine import torch_compiled_loss, torch_compiled_loss_masked
 
 
 def baseline_accumGrads_micro_step(
@@ -135,7 +135,7 @@ def baseline_accumGrads_impl(
         rendered_image, means2D, radiis, gaussian_ids = baseline_accumGrads_micro_step(
             means3D, opacities, scales, rotations, shs, sh_degree, camera, background
         )
-        loss = torch_compiled_loss(rendered_image, camera.original_image)
+        loss = torch_compiled_loss_masked(rendered_image, camera.original_image, camera.original_mask)
         torch.cuda.nvtx.range_pop()
 
         torch.cuda.nvtx.range_push("backward")

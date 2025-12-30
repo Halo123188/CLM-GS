@@ -21,6 +21,7 @@ from clm_kernels import (
 from densification import update_densification_stats_offload_accum_grads
 from strategies.base_engine import (
     torch_compiled_loss,
+    torch_compiled_loss_masked,
     TILE_SIZE,
     calculate_filters,
     pipeline_forward_one_step,
@@ -690,9 +691,10 @@ def clm_offload_train_one_batch(
             pipe_args,
         )
 
-        # Compute loss
-        loss = torch_compiled_loss(
-            rendered_image, batched_cameras[micro_idx].original_image
+        # Compute loss (with optional mask)
+        loss = torch_compiled_loss_masked(
+            rendered_image, batched_cameras[micro_idx].original_image,
+            batched_cameras[micro_idx].original_mask
         )
         torch.cuda.nvtx.range_pop()
 

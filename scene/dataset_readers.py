@@ -50,6 +50,7 @@ class CameraInfo(NamedTuple):
     image_name: str
     width: int
     height: int
+    mask_path: str = None  # Optional path to mask image
 
 
 class SceneInfo(NamedTuple):
@@ -88,6 +89,16 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder):
     args = utils.get_args()
     cam_infos = []
     utils.print_rank_0("Loading cameras from disk...")
+
+    # Check for masks folder (sibling to images folder)
+    images_folder_path = Path(images_folder)
+    masks_folder = images_folder_path.parent / "masks"
+    has_masks = masks_folder.exists() and masks_folder.is_dir()
+    if has_masks:
+        utils.print_rank_0(f"[MASK] Found masks folder: {masks_folder}")
+    else:
+        utils.print_rank_0(f"[MASK] No masks folder found at: {masks_folder}")
+
     for idx, key in tqdm(
         enumerate(cam_extrinsics),
         total=len(cam_extrinsics),
@@ -117,10 +128,20 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder):
             focal_length_y = intr.params[1]
             FovY = focal2fov(focal_length_y, height)
             FovX = focal2fov(focal_length_x, width)
+        elif intr.model == "SIMPLE_RADIAL":
+            # params: f, cx, cy, k1 (ignoring k1 distortion)
+            focal_length_x = intr.params[0]
+            FovY = focal2fov(focal_length_x, height)
+            FovX = focal2fov(focal_length_x, width)
+        elif intr.model == "RADIAL":
+            # params: f, cx, cy, k1, k2 (ignoring k1, k2 distortion)
+            focal_length_x = intr.params[0]
+            FovY = focal2fov(focal_length_x, height)
+            FovX = focal2fov(focal_length_x, width)
         else:
             assert (
                 False
-            ), "Colmap camera model not handled: only undistorted datasets (PINHOLE or SIMPLE_PINHOLE cameras) supported!"
+            ), f"Colmap camera model not handled: {intr.model}. Supported: PINHOLE, SIMPLE_PINHOLE, OPENCV, SIMPLE_RADIAL, RADIAL"
 
         image_path = os.path.join(images_folder, os.path.basename(extr.name))
         image_name = os.path.basename(image_path).split(".")[0]
@@ -128,6 +149,14 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder):
             image_path
         )  # this is a lazy load, the image is not loaded yet
         width, height = image.size
+
+        # Check for corresponding mask file
+        mask_path = None
+        if has_masks:
+            # Mask file is named {image_name}.png in masks folder
+            potential_mask_path = masks_folder / f"{image_name}.png"
+            if potential_mask_path.exists():
+                mask_path = str(potential_mask_path)
 
         cam_info = CameraInfo(
             uid=uid,
@@ -140,6 +169,7 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder):
             image_name=image_name,
             width=width,
             height=height,
+            mask_path=mask_path,
         )
 
         # release memory
@@ -147,6 +177,11 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder):
         image = None
 
         cam_infos.append(cam_info)
+
+    # Print mask loading summary
+    masks_loaded = sum(1 for c in cam_infos if c.mask_path is not None)
+    utils.print_rank_0(f"[MASK] Loaded {masks_loaded}/{len(cam_infos)} masks for cameras")
+
     return cam_infos
 
 
@@ -227,6 +262,7 @@ def readColmapSceneInfo(path, images, eval, llffhold=10):
         ply_path = os.path.join(path, "sparse/0/points3D.ply")
     else:
         ply_path = args.dense_ply_file
+        print(f"Using dense ply file from {ply_path}")
     bin_path = os.path.join(path, "sparse/0/points3D.bin")
     txt_path = os.path.join(path, "sparse/0/points3D.txt")
     if not os.path.exists(ply_path):

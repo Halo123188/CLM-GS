@@ -701,7 +701,9 @@ class GaussianModelNoOffload(BaseGaussianModel):
         )
 
         rots = build_rotation(self._rotation[selected_pts_mask]).repeat(N, 1, 1)
-        new_xyz = torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1) + self.get_xyz[
+        # Use element-wise ops to avoid cuBLAS issues on RTX 50 series
+        # Equivalent to: torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1)
+        new_xyz = (rots * samples.unsqueeze(1)).sum(dim=2) + self.get_xyz[
             selected_pts_mask
         ].repeat(N, 1)
         new_scaling = self.scaling_inverse_activation(

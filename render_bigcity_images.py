@@ -646,6 +646,7 @@ def render_single_image(
     save_path: str,
     args,
     scene: Scene = None,
+    mask: torch.Tensor = None,
 ):
     """
     Render a single image from a camera viewpoint and save it to disk.
@@ -657,6 +658,8 @@ def render_single_image(
         save_path: Path to save the rendered image (e.g., 'output/image_001.png')
         args: Command-line arguments containing offload strategy flags
         scene: Scene object (optional, used for some offload strategies)
+        mask: Optional mask tensor [H, W] where 1=valid, 0=masked.
+              Masked regions will be set to background color.
 
     Returns:
         rendered_image: The rendered image tensor [H, W, 3]
@@ -707,6 +710,15 @@ def render_single_image(
     # Ensure colors are in [H, W, 3] format
     if colors.shape[0] == 3:
         colors = colors.permute(1, 2, 0)  # [3, H, W] -> [H, W, 3]
+
+    # Apply mask if provided: set masked regions to background color
+    if mask is not None:
+        mask_expanded = mask.unsqueeze(-1)  # [H, W, 1]
+        if background is not None:
+            bg_color = background.view(1, 1, 3)  # [1, 1, 3]
+        else:
+            bg_color = torch.zeros(1, 1, 3, device=colors.device)
+        colors = colors * mask_expanded + bg_color * (1 - mask_expanded)
 
     # Convert to numpy for image saving
     colors_np = (colors * 255).cpu().to(torch.uint8).numpy()
@@ -811,6 +823,17 @@ def main():
         default=0.01,
         help="Sampling rate for point cloud visualization (default: 0.01 = 1%%)",
     )
+    parser.add_argument(
+        "--apply_masks",
+        action="store_true",
+        help="Apply masks to rendered images (masks out regions with background color)",
+    )
+    parser.add_argument(
+        "--masks_dir",
+        type=str,
+        default=None,
+        help="Directory containing mask images (default: source_path/masks)",
+    )
 
     args = parser.parse_args(sys.argv[1:])
 
@@ -839,7 +862,25 @@ def main():
     utils.print_rank_0(f"Number of frames: {args.n_frames}")
     utils.print_rank_0(f"Output directory: {args.output_dir}")
     utils.print_rank_0(f"Save video: {args.save_video}")
+    utils.print_rank_0(f"Apply masks: {args.apply_masks}")
     utils.print_rank_0("=" * 80)
+
+    # Setup mask loading if enabled
+    masks_cache = {}
+    masks_dir = None
+    if args.apply_masks:
+        if args.masks_dir is not None:
+            masks_dir = args.masks_dir
+        else:
+            # Default: look for masks folder next to images folder in source_path
+            masks_dir = os.path.join(args.source_path, "masks")
+
+        if os.path.exists(masks_dir):
+            utils.print_rank_0(f"[MASK] Will apply masks from: {masks_dir}")
+        else:
+            utils.print_rank_0(f"[MASK] Warning: Masks directory not found: {masks_dir}")
+            utils.print_rank_0("[MASK] Rendering without masks")
+            masks_dir = None
 
     # Initialize Gaussian model based on offload strategy
     dataset_args = lp.extract(args)
@@ -915,28 +956,51 @@ def main():
     FoVx = scene_info.train_cameras[0].FovX
     FoVy = scene_info.train_cameras[0].FovY
 
-    # Generate trajectory cameras
-    R_fixed = scene_info.train_cameras[0].R
-    # R_fixed is world-to-camera rotation matrix (stored transposed) = camera-to-world rotation matrix
+    # Generate trajectory cameras based on traj_path argument
+    if args.traj_path == "original":
+        # Use original training camera poses
+        utils.print_rank_0("Using original training camera poses for trajectory")
+        trajectory_cameras = []
+        for idx, cam_info in enumerate(scene_info.train_cameras):
+            image_placeholder = torch.zeros((3, image_height, image_width), dtype=torch.float32)
+            camera = Camera(
+                colmap_id=idx,
+                R=cam_info.R,
+                T=cam_info.T,
+                FoVx=cam_info.FovX,
+                FoVy=cam_info.FovY,
+                image=image_placeholder,
+                gt_alpha_mask=None,
+                image_name=cam_info.image_name,
+                uid=idx,
+                offload=True,
+            )
+            Camera.original_image_backup = None
+            trajectory_cameras.append(camera)
+        utils.print_rank_0(f"  Using {len(trajectory_cameras)} original training cameras")
+    else:
+        # Use custom trajectory (convex hull / manual)
+        R_fixed = scene_info.train_cameras[0].R
+        # R_fixed is world-to-camera rotation matrix (stored transposed) = camera-to-world rotation matrix
 
-    # Rotate R_fixed around x-axis
-    angle = np.radians(30)  # Rotation angle in degrees (adjust as needed)
-    new_R = create_rotation_matrix(angle, "y")
-    R_fixed = new_R @ R_fixed  # This performs reasonably well.
+        # Rotate R_fixed around x-axis
+        angle = np.radians(30)  # Rotation angle in degrees (adjust as needed)
+        new_R = create_rotation_matrix(angle, "y")
+        R_fixed = new_R @ R_fixed  # This performs reasonably well.
 
-    # manually fix one.
-    R_fixed = np.array(
-        [[1, 0, 0], [0, 1, 0], [0, 0, -1]]
-    )  # this scene is easy that we can use this simple rotation matrix.
-    trajectory_cameras = generate_convex_hull_trajectory_v2(
-        R_fixed=R_fixed,
-        height_z=args.manual_height,
-        n_frames=args.n_frames,
-        FoVx=FoVx,
-        FoVy=FoVy,
-        width=image_width,
-        height=image_height,
-    )
+        # manually fix one.
+        R_fixed = np.array(
+            [[1, 0, 0], [0, 1, 0], [0, 0, -1]]
+        )  # this scene is easy that we can use this simple rotation matrix.
+        trajectory_cameras = generate_convex_hull_trajectory_v2(
+            R_fixed=R_fixed,
+            height_z=args.manual_height,
+            n_frames=args.n_frames,
+            FoVx=FoVx,
+            FoVy=FoVy,
+            width=image_width,
+            height=image_height,
+        )
     # import pdb; pdb.set_trace()
     # Visualize point cloud with trajectory if requested
     if args.visualize_pointcloud:
@@ -983,6 +1047,28 @@ def main():
         # Generate save path for this frame
         save_path = os.path.join(args.output_dir, f"frame_{frame_idx:05d}.png")
 
+        # Load mask for this camera if masks are enabled
+        mask_tensor = None
+        if masks_dir is not None and hasattr(camera, 'image_name'):
+            mask_path = os.path.join(masks_dir, f"{camera.image_name}.png")
+            if mask_path not in masks_cache:
+                if os.path.exists(mask_path):
+                    try:
+                        mask_img = Image.open(mask_path).convert('L')
+                        mask_np = np.array(mask_img)
+                        # Resize if needed
+                        if mask_np.shape[0] != image_height or mask_np.shape[1] != image_width:
+                            mask_img = mask_img.resize((image_width, image_height), Image.LANCZOS)
+                            mask_np = np.array(mask_img)
+                        masks_cache[mask_path] = torch.from_numpy(mask_np > 127).float().cuda()
+                        mask_img.close()
+                    except Exception as e:
+                        utils.print_rank_0(f"[MASK] Warning: Failed to load mask {mask_path}: {e}")
+                        masks_cache[mask_path] = None
+                else:
+                    masks_cache[mask_path] = None
+            mask_tensor = masks_cache.get(mask_path)
+
         # Render and save single image
         rendered_colors = render_single_image(
             camera=camera,
@@ -991,6 +1077,7 @@ def main():
             save_path=save_path,
             args=args,
             scene=None,
+            mask=mask_tensor,
         )
 
         # Optionally add to video

@@ -116,6 +116,25 @@ def loadCam_raw_from_disk(args, id, cam_info, to_gpu=False):
     # assert image_tensor.shape[0] == 3, image_tensor.shape[0]
     image_tensor = image_tensor[:3, ...].contiguous()
 
+    # Load mask if available
+    mask_tensor = None
+    if cam_info.mask_path is not None:
+        try:
+            mask_img = Image.open(cam_info.mask_path).convert('L')  # Grayscale
+            mask_np = np.array(mask_img)
+            # Resize mask to match image dimensions if needed
+            if mask_np.shape[0] != orig_h or mask_np.shape[1] != orig_w:
+                mask_img = mask_img.resize((orig_w, orig_h), Image.LANCZOS)
+                mask_np = np.array(mask_img)
+            # Convert to boolean tensor (white=True=valid, black=False=masked)
+            mask_tensor = torch.from_numpy(mask_np > 127).float()  # (H, W)
+            # Calculate mask coverage (percentage of valid pixels)
+            mask_coverage = mask_tensor.mean().item() * 100
+            mask_img.close()
+        except Exception as e:
+            print(f"[MASK] Warning: Failed to load mask {cam_info.mask_path}: {e}")
+            mask_tensor = None
+
     return Camera(
         colmap_id=cam_info.uid,
         R=cam_info.R,
@@ -127,6 +146,7 @@ def loadCam_raw_from_disk(args, id, cam_info, to_gpu=False):
         image_name=cam_info.image_name,
         uid=id,
         offload=True,
+        mask=mask_tensor,
     )
 
 

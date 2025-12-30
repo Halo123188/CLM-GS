@@ -55,6 +55,7 @@ class Camera(nn.Module):
         trans=np.array([0.0, 0.0, 0.0]),
         scale=1.0,
         offload=False,
+        mask=None,
     ):
         super(Camera, self).__init__()
 
@@ -78,6 +79,13 @@ class Camera(nn.Module):
         self.original_image_backup = image.contiguous()
         self.image_width = self.original_image_backup.shape[2]
         self.image_height = self.original_image_backup.shape[1]
+
+        # Store mask if provided (shape: H, W, values 0 or 1)
+        if mask is not None:
+            self.original_mask_backup = mask.contiguous()
+        else:
+            self.original_mask_backup = None
+        self.original_mask = None  # Will be set when transferred to GPU
 
         if args.time_image_loading:
             log_file.write(f"Image processing in {time.time() - start_time} seconds\n")

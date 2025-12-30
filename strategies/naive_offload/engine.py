@@ -11,6 +11,7 @@ from gsplat import (
 from densification import update_densification_stats_offload_accum_grads
 from strategies.base_engine import (
     torch_compiled_loss,
+    torch_compiled_loss_masked,
     TILE_SIZE,
     calculate_filters,
     pipeline_forward_one_step,
@@ -219,7 +220,7 @@ def naive_offload_train_one_batch(
         # ------------------------------------------------------------------------
         # 3.3: Backward pass - Compute loss and gradients
         # ------------------------------------------------------------------------
-        loss = torch_compiled_loss(rendered_image, camera.original_image)
+        loss = torch_compiled_loss_masked(rendered_image, camera.original_image, camera.original_mask)
         loss.backward()
         losses.append(loss.detach())
 
