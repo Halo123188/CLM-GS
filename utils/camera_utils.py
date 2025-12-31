@@ -135,6 +135,23 @@ def loadCam_raw_from_disk(args, id, cam_info, to_gpu=False):
             print(f"[MASK] Warning: Failed to load mask {cam_info.mask_path}: {e}")
             mask_tensor = None
 
+    # Load depth if available
+    depth_tensor = None
+    if cam_info.depth_path is not None:
+        try:
+            depth_img = Image.open(cam_info.depth_path)
+            depth_np = np.array(depth_img).astype(np.float32)
+            # Resize depth to match image dimensions if needed
+            if depth_np.shape[0] != orig_h or depth_np.shape[1] != orig_w:
+                depth_img = depth_img.resize((orig_w, orig_h), Image.LANCZOS)
+                depth_np = np.array(depth_img).astype(np.float32)
+            # Convert to tensor (H, W) - depth values in mm, convert to meters
+            depth_tensor = torch.from_numpy(depth_np / 1000.0)  # Convert mm to meters
+            depth_img.close()
+        except Exception as e:
+            print(f"[DEPTH] Warning: Failed to load depth {cam_info.depth_path}: {e}")
+            depth_tensor = None
+
     return Camera(
         colmap_id=cam_info.uid,
         R=cam_info.R,
@@ -147,6 +164,7 @@ def loadCam_raw_from_disk(args, id, cam_info, to_gpu=False):
         uid=id,
         offload=True,
         mask=mask_tensor,
+        depth=depth_tensor,
     )
 
 

@@ -51,6 +51,7 @@ class CameraInfo(NamedTuple):
     width: int
     height: int
     mask_path: str = None  # Optional path to mask image
+    depth_path: str = None  # Optional path to depth image
 
 
 class SceneInfo(NamedTuple):
@@ -98,6 +99,14 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder):
         utils.print_rank_0(f"[MASK] Found masks folder: {masks_folder}")
     else:
         utils.print_rank_0(f"[MASK] No masks folder found at: {masks_folder}")
+
+    # Check for depths folder (sibling to images folder)
+    depths_folder = images_folder_path.parent / "depths"
+    has_depths = depths_folder.exists() and depths_folder.is_dir()
+    if has_depths:
+        utils.print_rank_0(f"[DEPTH] Found depths folder: {depths_folder}")
+    else:
+        utils.print_rank_0(f"[DEPTH] No depths folder found at: {depths_folder}")
 
     for idx, key in tqdm(
         enumerate(cam_extrinsics),
@@ -158,6 +167,14 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder):
             if potential_mask_path.exists():
                 mask_path = str(potential_mask_path)
 
+        # Check for corresponding depth file
+        depth_path = None
+        if has_depths:
+            # Depth file is named {image_name}.png in depths folder
+            potential_depth_path = depths_folder / f"{image_name}.png"
+            if potential_depth_path.exists():
+                depth_path = str(potential_depth_path)
+
         cam_info = CameraInfo(
             uid=uid,
             R=R,
@@ -170,6 +187,7 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder):
             width=width,
             height=height,
             mask_path=mask_path,
+            depth_path=depth_path,
         )
 
         # release memory
@@ -181,6 +199,10 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder):
     # Print mask loading summary
     masks_loaded = sum(1 for c in cam_infos if c.mask_path is not None)
     utils.print_rank_0(f"[MASK] Loaded {masks_loaded}/{len(cam_infos)} masks for cameras")
+
+    # Print depth loading summary
+    depths_loaded = sum(1 for c in cam_infos if c.depth_path is not None)
+    utils.print_rank_0(f"[DEPTH] Loaded {depths_loaded}/{len(cam_infos)} depth maps for cameras")
 
     return cam_infos
 

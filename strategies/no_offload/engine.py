@@ -23,6 +23,7 @@ def baseline_accumGrads_micro_step(
     background,
     mode="train",
     tile_size=16,
+    render_depth=False,
 ):
     args = utils.get_args()
     # Prepare camera param.
@@ -98,7 +99,28 @@ def baseline_accumGrads_micro_step(
     rendered_image = rendered_image.squeeze(0).permute(2, 0, 1).contiguous()
     gaussian_ids = None
 
-    return rendered_image, means2D, radiis, gaussian_ids
+    # Render depth map if requested
+    rendered_depth = None
+    if render_depth:
+        # Use depths as single-channel "color" to render depth map
+        # depths shape: (1, N) -> need (1, N, 1) for rasterize_to_pixels
+        depth_colors = depths.unsqueeze(-1)  # (1, N, 1)
+        rendered_depth_raw, _ = rasterize_to_pixels(
+            means2d=means2D,
+            conics=conics,
+            colors=depth_colors,
+            opacities=opacities.squeeze(1).unsqueeze(0),
+            image_width=image_width,
+            image_height=image_height,
+            tile_size=tile_size,
+            isect_offsets=isect_offsets,
+            flatten_ids=flatten_ids,
+            backgrounds=None,  # No background for depth
+        )
+        # Shape: (1, H, W, 1) -> (H, W)
+        rendered_depth = rendered_depth_raw.squeeze(0).squeeze(-1).contiguous()
+
+    return rendered_image, means2D, radiis, gaussian_ids, rendered_depth
 
 
 def baseline_accumGrads_impl(
@@ -108,7 +130,10 @@ def baseline_accumGrads_impl(
     background,
     scaling_modifier=1.0,
     sparse_adam=False,
+    lambda_depth=0.0,
 ):
+    from utils.loss_utils import depth_loss
+
     losses = []
 
     means3D = gaussians.get_xyz
@@ -129,13 +154,32 @@ def baseline_accumGrads_impl(
         else None
     )
 
+    # Check if depth supervision is enabled
+    use_depth = lambda_depth > 0
+
     for micro_idx, camera in enumerate(batched_cameras):
         torch.cuda.nvtx.range_push(f"micro idx {micro_idx}")
         torch.cuda.nvtx.range_push("forward")
-        rendered_image, means2D, radiis, gaussian_ids = baseline_accumGrads_micro_step(
-            means3D, opacities, scales, rotations, shs, sh_degree, camera, background
+
+        # Check if this camera has depth
+        has_depth = use_depth and camera.original_depth is not None
+
+        rendered_image, means2D, radiis, gaussian_ids, rendered_depth = baseline_accumGrads_micro_step(
+            means3D, opacities, scales, rotations, shs, sh_degree, camera, background,
+            render_depth=has_depth
         )
+
+        # Compute RGB loss
         loss = torch_compiled_loss_masked(rendered_image, camera.original_image, camera.original_mask)
+
+        # Add depth loss if available
+        if has_depth and rendered_depth is not None:
+            gt_depth = camera.original_depth
+            # Use mask if available
+            depth_mask = camera.original_mask if camera.original_mask is not None else None
+            d_loss = depth_loss(rendered_depth, gt_depth, depth_mask)
+            loss = loss + lambda_depth * d_loss
+
         torch.cuda.nvtx.range_pop()
 
         torch.cuda.nvtx.range_push("backward")
@@ -164,6 +208,8 @@ def baseline_accumGrads_impl(
             torch.cuda.nvtx.range_pop()
 
         del loss, rendered_image, means2D, radiis
+        if rendered_depth is not None:
+            del rendered_depth
 
         torch.cuda.nvtx.range_pop()
 

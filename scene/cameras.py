@@ -56,6 +56,7 @@ class Camera(nn.Module):
         scale=1.0,
         offload=False,
         mask=None,
+        depth=None,
     ):
         super(Camera, self).__init__()
 
@@ -86,6 +87,13 @@ class Camera(nn.Module):
         else:
             self.original_mask_backup = None
         self.original_mask = None  # Will be set when transferred to GPU
+
+        # Store depth if provided (shape: H, W, values in meters)
+        if depth is not None:
+            self.original_depth_backup = depth.contiguous()
+        else:
+            self.original_depth_backup = None
+        self.original_depth = None  # Will be set when transferred to GPU
 
         if args.time_image_loading:
             log_file.write(f"Image processing in {time.time() - start_time} seconds\n")

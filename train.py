@@ -307,11 +307,12 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
         timers.stop("send cam matrices to gpu")
 
         # ------------------------------------------------------------------------
-        # 2.4: Load ground-truth images and masks to GPU
+        # 2.4: Load ground-truth images, masks, and depths to GPU
         # ------------------------------------------------------------------------
         with torch.no_grad():
             timers.start("load_cameras")
             masks_in_batch = 0
+            depths_in_batch = 0
             for camera in batched_cameras:
                 camera.original_image = camera.original_image_backup.cuda()
                 # Load mask to GPU if available
@@ -320,6 +321,12 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
                     masks_in_batch += 1
                 else:
                     camera.original_mask = None
+                # Load depth to GPU if available
+                if camera.original_depth_backup is not None:
+                    camera.original_depth = camera.original_depth_backup.cuda()
+                    depths_in_batch += 1
+                else:
+                    camera.original_depth = None
             timers.stop("load_cameras")
             # Log mask usage on first iteration only
             if iteration == start_from_this_iteration:
@@ -327,6 +334,13 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
                     utils.print_rank_0(f"[MASK] Training with masks enabled: {masks_in_batch}/{len(batched_cameras)} cameras in batch have masks")
                 else:
                     utils.print_rank_0("[MASK] Training without masks (no masks found for cameras)")
+                # Log depth usage
+                if depths_in_batch > 0 and args.lambda_depth > 0:
+                    utils.print_rank_0(f"[DEPTH] Training with depth supervision enabled: {depths_in_batch}/{len(batched_cameras)} cameras in batch have depth, lambda_depth={args.lambda_depth}")
+                elif depths_in_batch > 0:
+                    utils.print_rank_0(f"[DEPTH] Depth maps available but lambda_depth=0, depth supervision disabled")
+                else:
+                    utils.print_rank_0("[DEPTH] Training without depth supervision (no depth maps found for cameras)")
         # ------------------------------------------------------------------------
         # 2.5: Forward/Backward Pass - Choose offloading strategy
         # ------------------------------------------------------------------------
@@ -424,6 +438,7 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
                 batched_cameras,
                 background,
                 sparse_adam=args.sparse_adam,
+                lambda_depth=args.lambda_depth,
             )
             batched_screenspace_pkg = {}
 
@@ -605,10 +620,11 @@ def training(dataset_args, opt_args, pipe_args, args, log_file):
         # ------------------------------------------------------------------------
         torch.cuda.synchronize()  # Ensure all GPU operations are complete
 
-        # Release camera image and mask memory
+        # Release camera image, mask, and depth memory
         for viewpoint_cam in batched_cameras:
             viewpoint_cam.original_image = None
             viewpoint_cam.original_mask = None
+            viewpoint_cam.original_depth = None
 
         # End profiling range if active
         if args.nsys_profile:
@@ -799,7 +815,7 @@ def training_report(
                         batched_image.append(rendered_image)
 
                     elif args.no_offload:
-                        rendered_image, _, _, _ = baseline_accumGrads_micro_step(
+                        rendered_image, _, _, _, _ = baseline_accumGrads_micro_step(
                             means3D=scene.gaussians.get_xyz,
                             opacities=scene.gaussians.get_opacity,
                             scales=scene.gaussians.get_scaling,

@@ -134,3 +134,74 @@ def pixelwise_ssim_with_mask(img1, img2, pixel_mask):
     pixelwise_ssim_loss = pixelwise_ssim_loss * pixel_mask.unsqueeze(0)
 
     return pixelwise_ssim_loss
+
+
+def depth_loss(rendered_depth, gt_depth, valid_mask=None):
+    """
+    Compute depth loss between rendered depth and ground truth depth.
+
+    Args:
+        rendered_depth: Rendered depth map (H, W) in camera space (z-depth)
+        gt_depth: Ground truth depth map (H, W) in meters
+        valid_mask: Optional mask (H, W) where 1=valid, 0=invalid.
+                   If None, uses gt_depth > 0 as valid mask.
+
+    Returns:
+        Scalar depth loss value
+    """
+    # Create valid mask: only supervise where gt_depth is valid (> 0)
+    if valid_mask is None:
+        valid_mask = (gt_depth > 0).float()
+    else:
+        # Combine with depth validity
+        valid_mask = valid_mask * (gt_depth > 0).float()
+
+    # Also mask out where rendered depth is invalid
+    valid_mask = valid_mask * (rendered_depth > 0).float()
+
+    # Count valid pixels
+    num_valid = valid_mask.sum()
+    if num_valid < 1:
+        return torch.tensor(0.0, device=rendered_depth.device)
+
+    # L1 depth loss on valid pixels
+    depth_diff = torch.abs(rendered_depth - gt_depth) * valid_mask
+    loss = depth_diff.sum() / num_valid
+
+    return loss
+
+
+def depth_loss_log(rendered_depth, gt_depth, valid_mask=None):
+    """
+    Compute depth loss in log space, which is more robust to scale differences.
+
+    Args:
+        rendered_depth: Rendered depth map (H, W) in camera space (z-depth)
+        gt_depth: Ground truth depth map (H, W) in meters
+        valid_mask: Optional mask (H, W) where 1=valid, 0=invalid.
+
+    Returns:
+        Scalar depth loss value in log space
+    """
+    # Create valid mask: only supervise where gt_depth is valid (> 0)
+    if valid_mask is None:
+        valid_mask = (gt_depth > 0).float()
+    else:
+        valid_mask = valid_mask * (gt_depth > 0).float()
+
+    # Also mask out where rendered depth is invalid
+    valid_mask = valid_mask * (rendered_depth > 0).float()
+
+    # Count valid pixels
+    num_valid = valid_mask.sum()
+    if num_valid < 1:
+        return torch.tensor(0.0, device=rendered_depth.device)
+
+    # Log-space L1 depth loss
+    eps = 1e-6
+    log_rendered = torch.log(rendered_depth + eps)
+    log_gt = torch.log(gt_depth + eps)
+    depth_diff = torch.abs(log_rendered - log_gt) * valid_mask
+    loss = depth_diff.sum() / num_valid
+
+    return loss

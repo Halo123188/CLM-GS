@@ -690,7 +690,7 @@ def render_single_image(
             scene=scene,
         )
     elif args.no_offload:
-        rendered_image, _, _, _ = baseline_accumGrads_micro_step(
+        rendered_image, _, _, _, _ = baseline_accumGrads_micro_step(
             means3D=gaussians.get_xyz,
             opacities=gaussians.get_opacity,
             scales=gaussians.get_scaling,
