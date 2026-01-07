@@ -834,6 +834,14 @@ def main():
         default=None,
         help="Directory containing mask images (default: source_path/masks)",
     )
+    parser.add_argument(
+        "--camera_offset",
+        type=float,
+        nargs=3,
+        default=None,
+        metavar=("X", "Y", "Z"),
+        help="Systematic offset to add to all camera positions in world coordinates (e.g., --camera_offset 0 0 1.0 to move cameras up by 1 unit)",
+    )
 
     args = parser.parse_args(sys.argv[1:])
 
@@ -863,6 +871,10 @@ def main():
     utils.print_rank_0(f"Output directory: {args.output_dir}")
     utils.print_rank_0(f"Save video: {args.save_video}")
     utils.print_rank_0(f"Apply masks: {args.apply_masks}")
+    if args.camera_offset is not None:
+        utils.print_rank_0(f"Camera offset: X={args.camera_offset[0]}, Y={args.camera_offset[1]}, Z={args.camera_offset[2]}")
+    else:
+        utils.print_rank_0("Camera offset: None (using original poses)")
     utils.print_rank_0("=" * 80)
 
     # Setup mask loading if enabled
@@ -960,13 +972,34 @@ def main():
     if args.traj_path == "original":
         # Use original training camera poses
         utils.print_rank_0("Using original training camera poses for trajectory")
+
+        # Check if camera offset is specified
+        camera_offset = None
+        if args.camera_offset is not None:
+            camera_offset = np.array(args.camera_offset)
+            utils.print_rank_0(f"  Applying camera offset: X={camera_offset[0]}, Y={camera_offset[1]}, Z={camera_offset[2]}")
+
         trajectory_cameras = []
         for idx, cam_info in enumerate(scene_info.train_cameras):
             image_placeholder = torch.zeros((3, image_height, image_width), dtype=torch.float32)
+
+            # Get original R and T
+            R = cam_info.R
+            T = cam_info.T
+
+            # Apply offset if specified
+            # The offset is in world coordinates, so we need to transform it to camera coordinates
+            # Camera translation T relates to camera position as: cam_pos_world = -R^T @ T
+            # To shift camera position in world by offset: new_cam_pos = old_cam_pos + offset
+            # Therefore: new_T = -R @ new_cam_pos = -R @ (old_cam_pos + offset) = T - R @ offset
+            if camera_offset is not None:
+                R_world_to_cam = R.T  # R is stored transposed (camera-to-world)
+                T = T - R_world_to_cam @ camera_offset
+
             camera = Camera(
                 colmap_id=idx,
-                R=cam_info.R,
-                T=cam_info.T,
+                R=R,
+                T=T,
                 FoVx=cam_info.FovX,
                 FoVy=cam_info.FovY,
                 image=image_placeholder,

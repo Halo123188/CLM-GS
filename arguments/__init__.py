@@ -127,6 +127,7 @@ class AuxiliaryParams(ParamGroup):
         self.load_ply_max = 1_000_000  # Maximum number of points to load from PLY
         self.load_pt_path = ""  # Path to load PyTorch checkpoint
         self.dense_ply_file = ""  # Path to dense PLY file
+        self.depths_folder = ""  # Path to folder containing depth images (default: <source_path>/depths)
         self.start_checkpoint = ""  # Checkpoint to resume training from
         self.auto_start_checkpoint = (
             False  # Automatically find and load latest checkpoint

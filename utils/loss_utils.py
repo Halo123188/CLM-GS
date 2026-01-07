@@ -138,7 +138,12 @@ def pixelwise_ssim_with_mask(img1, img2, pixel_mask):
 
 def depth_loss(rendered_depth, gt_depth, valid_mask=None):
     """
-    Compute depth loss between rendered depth and ground truth depth.
+    Compute depth loss in disparity space (1/depth) between rendered depth and ground truth depth.
+
+    Using disparity space is more numerically stable because:
+    - Far objects have small disparity values, near objects have large values
+    - Errors scale proportionally to distance
+    - More robust to outliers at large depths
 
     Args:
         rendered_depth: Rendered depth map (H, W) in camera space (z-depth)
@@ -147,7 +152,7 @@ def depth_loss(rendered_depth, gt_depth, valid_mask=None):
                    If None, uses gt_depth > 0 as valid mask.
 
     Returns:
-        Scalar depth loss value
+        Scalar depth loss value in disparity space
     """
     # Create valid mask: only supervise where gt_depth is valid (> 0)
     if valid_mask is None:
@@ -164,9 +169,14 @@ def depth_loss(rendered_depth, gt_depth, valid_mask=None):
     if num_valid < 1:
         return torch.tensor(0.0, device=rendered_depth.device)
 
-    # L1 depth loss on valid pixels
-    depth_diff = torch.abs(rendered_depth - gt_depth) * valid_mask
-    loss = depth_diff.sum() / num_valid
+    # Convert to disparity space (1/depth)
+    eps = 1e-6
+    disp_rendered = 1.0 / (rendered_depth + eps)
+    disp_gt = 1.0 / (gt_depth + eps)
+
+    # L1 loss in disparity space on valid pixels
+    disp_diff = torch.abs(disp_rendered - disp_gt) * valid_mask
+    loss = disp_diff.sum() / num_valid
 
     return loss
 

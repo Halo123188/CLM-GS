@@ -100,8 +100,12 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder):
     else:
         utils.print_rank_0(f"[MASK] No masks folder found at: {masks_folder}")
 
-    # Check for depths folder (sibling to images folder)
-    depths_folder = images_folder_path.parent / "depths"
+    # Check for depths folder (use --depths_folder if specified, otherwise sibling to images folder)
+    if args.depths_folder != "":
+        depths_folder = Path(args.depths_folder)
+        utils.print_rank_0(f"[DEPTH] Using custom depths folder: {depths_folder}")
+    else:
+        depths_folder = images_folder_path.parent / "depths"
     has_depths = depths_folder.exists() and depths_folder.is_dir()
     if has_depths:
         utils.print_rank_0(f"[DEPTH] Found depths folder: {depths_folder}")
